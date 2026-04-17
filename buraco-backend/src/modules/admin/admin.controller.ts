@@ -201,6 +201,28 @@ export class AdminController {
     return this.adminService.setConfig(adminId, key, dto);
   }
 
+  // ─── Missions ─────────────────────────────────────────────────────────────
+
+  @Get('missions')
+  @UseGuards(AdminJwtGuard)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'List all missions' })
+  listMissions() {
+    return this.adminService.listMissions();
+  }
+
+  @Patch('missions/:missionId/toggle')
+  @UseGuards(AdminJwtGuard)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Toggle mission active state' })
+  toggleMission(
+    @CurrentUser('id') adminId: string,
+    @Param('missionId') missionId: string,
+    @Body('isActive') isActive: boolean,
+  ) {
+    return this.adminService.toggleMission(adminId, missionId, isActive);
+  }
+
   // ─── Audit Logs ───────────────────────────────────────────────────────────
 
   @Get('audit-logs')

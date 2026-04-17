@@ -1,4 +1,5 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import { GameMode, GameStatus, GameVariant, MoveType } from '@prisma/client';
 import { v4 as uuidv4 } from 'uuid';
 import { PrismaService } from '../../common/prisma/prisma.service';
@@ -32,12 +33,32 @@ export interface GameState {
 
 @Injectable()
 export class GameEngineService {
+  private readonly logger = new Logger(GameEngineService.name);
+
   constructor(
     private prisma: PrismaService,
     private redis: RedisService,
     private economyService: EconomyService,
     private statsService: StatsService,
   ) {}
+
+  @Cron(CronExpression.EVERY_5_SECONDS)
+  async checkTurnTimeouts() {
+    try {
+      const keys = await this.redis.keys('game:*:state');
+      await Promise.all(
+        keys.map(async (key) => {
+          const state = await this.redis.getJson<GameState>(key);
+          if (!state || state.status !== GameStatus.IN_PROGRESS) return;
+          if (Date.now() - state.turnStartedAt > state.turnDuration * 1000) {
+            await this.handleTurnTimeout(state.gameId);
+          }
+        }),
+      );
+    } catch (err) {
+      this.logger.error('checkTurnTimeouts error', err);
+    }
+  }
 
   stateKey(gameId: string) {
     return `game:${gameId}:state`;

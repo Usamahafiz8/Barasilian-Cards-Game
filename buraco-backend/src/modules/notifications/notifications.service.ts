@@ -1,15 +1,45 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { NotificationType } from '@prisma/client';
 import { PrismaService } from '../../common/prisma/prisma.service';
 
 @Injectable()
 export class NotificationsService {
+  private readonly logger = new Logger(NotificationsService.name);
+
   constructor(private prisma: PrismaService) {}
 
+  private async sendPush(userId: string, title: string, body: string, data?: object): Promise<void> {
+    try {
+      const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { fcmToken: true } });
+      if (!user?.fcmToken) return;
+
+      const serverKey = process.env.FCM_SERVER_KEY;
+      if (!serverKey) return;
+
+      await fetch('https://fcm.googleapis.com/fcm/send', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `key=${serverKey}`,
+        },
+        body: JSON.stringify({
+          to: user.fcmToken,
+          notification: { title, body },
+          data: data ?? {},
+        }),
+      });
+    } catch (err) {
+      this.logger.error(`FCM push failed for user ${userId}`, err);
+    }
+  }
+
   async create(userId: string, type: NotificationType, title: string, body: string, data?: object) {
-    return this.prisma.notification.create({
+    const notification = await this.prisma.notification.create({
       data: { userId, type, title, body, data: data as any },
     });
+    // Fire-and-forget push
+    this.sendPush(userId, title, body, data).catch(() => {});
+    return notification;
   }
 
   async getNotifications(userId: string, page = 1, limit = 20, unreadOnly = false) {

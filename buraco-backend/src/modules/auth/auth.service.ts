@@ -12,6 +12,7 @@ import * as bcrypt from 'bcryptjs';
 import { OAuth2Client } from 'google-auth-library';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { RedisService } from '../../common/redis/redis.service';
+import { MailService } from '../../common/mail/mail.service';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
@@ -28,6 +29,7 @@ export class AuthService {
     private redis: RedisService,
     private jwt: JwtService,
     private config: ConfigService,
+    private mail: MailService,
   ) {
     this.googleClient = new OAuth2Client(config.get('google.clientId'));
   }
@@ -191,8 +193,7 @@ export class AuthService {
     const otp = Math.random().toString(36).slice(2, 10).toUpperCase();
     await this.redis.set(`otp:${email}`, otp, 600); // 10 min TTL
 
-    // TODO: send email via NodeMailer — plugged in when SMTP is configured
-    // await this.mailer.sendPasswordReset(email, otp);
+    await this.mail.sendPasswordReset(email, otp);
   }
 
   async resetPassword(dto: ResetPasswordDto) {

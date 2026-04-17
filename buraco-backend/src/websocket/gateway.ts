@@ -14,6 +14,7 @@ import { GameEngineService } from '../modules/game-engine/game-engine.service';
 import { MessagingService } from '../modules/messaging/messaging.service';
 import { NotificationsService } from '../modules/notifications/notifications.service';
 import { RedisService } from '../common/redis/redis.service';
+import { ReconnectionService } from '../modules/reconnection/reconnection.service';
 import { MoveType } from '@prisma/client';
 import { Logger } from '@nestjs/common';
 
@@ -32,6 +33,7 @@ export class AppGateway implements OnGatewayConnection, OnGatewayDisconnect {
     private messaging: MessagingService,
     private notifications: NotificationsService,
     private redis: RedisService,
+    private reconnection: ReconnectionService,
   ) {}
 
   // ─── Connection ───────────────────────────────────────────────────────────
@@ -123,6 +125,7 @@ export class AppGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const userId = socket.data.userId;
     socket.join(`game:${data.gameId}`);
     await this.redis.set(`user:${userId}:activeGame`, data.gameId, 86400);
+    await this.reconnection.setActiveGame(userId, data.gameId);
   }
 
   @SubscribeMessage('game:reconnect')
@@ -147,6 +150,9 @@ export class AppGateway implements OnGatewayConnection, OnGatewayDisconnect {
       const result = await this.gameEngine.processMove(data.gameId, userId, { type, source: data.source });
       if ('winnerTeam' in result) {
         this.server.to(`game:${data.gameId}`).emit('game:end', { gameId: data.gameId, ...result });
+        // Clear active game for all players in the room
+        const sockets = await this.server.in(`game:${data.gameId}`).fetchSockets();
+        await Promise.all(sockets.map((s) => this.reconnection.clearActiveGame(s.data.userId)));
       } else {
         this.server.to(`game:${data.gameId}`).emit('game:move_played', { gameId: data.gameId, playerId: userId, moveType: type, result: result.result, nextTurnPlayerId: result.nextTurnPlayerId, turnTimeLimit: 30 });
       }
@@ -162,6 +168,9 @@ export class AppGateway implements OnGatewayConnection, OnGatewayDisconnect {
       const result = await this.gameEngine.processMove(data.gameId, userId, { type: MoveType.DISCARD, cardIds: [data.cardId] });
       if (result && 'winnerTeam' in result) {
         this.server.to(`game:${data.gameId}`).emit('game:end', { gameId: data.gameId, ...result });
+        // Clear active game for all players in the room
+        const sockets = await this.server.in(`game:${data.gameId}`).fetchSockets();
+        await Promise.all(sockets.map((s) => this.reconnection.clearActiveGame(s.data.userId)));
       } else {
         this.server.to(`game:${data.gameId}`).emit('game:move_played', { gameId: data.gameId, playerId: userId, moveType: MoveType.DISCARD, result: result.result, nextTurnPlayerId: result.nextTurnPlayerId, turnTimeLimit: 30 });
       }

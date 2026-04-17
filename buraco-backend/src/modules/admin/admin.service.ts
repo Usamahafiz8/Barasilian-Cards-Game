@@ -254,6 +254,20 @@ export class AdminService {
     return cfg;
   }
 
+  // ─── Missions ─────────────────────────────────────────────────────────────
+
+  async listMissions() {
+    return this.prisma.mission.findMany({ orderBy: { type: 'asc' } });
+  }
+
+  async toggleMission(adminId: string, missionId: string, isActive: boolean) {
+    const m = await this.prisma.mission.findUnique({ where: { id: missionId } });
+    if (!m) throw new NotFoundException('Mission not found');
+    const updated = await this.prisma.mission.update({ where: { id: missionId }, data: { isActive } });
+    await this.audit(adminId, isActive ? 'ACTIVATE_MISSION' : 'DEACTIVATE_MISSION', 'Mission', missionId, {});
+    return updated;
+  }
+
   // ─── Audit Logs ───────────────────────────────────────────────────────────
 
   async getAuditLogs(page: number, limit: number) {

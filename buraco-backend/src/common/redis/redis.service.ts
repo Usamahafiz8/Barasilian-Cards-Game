@@ -108,4 +108,8 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
   ttl(key: string) {
     return this.client.ttl(key);
   }
+
+  keys(pattern: string): Promise<string[]> {
+    return this.client.keys(pattern);
+  }
 }
