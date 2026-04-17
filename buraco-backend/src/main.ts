@@ -48,6 +48,7 @@ async function bootstrap() {
     .addTag('Game')
     .addTag('Messaging')
     .addTag('Match History')
+    .addTag('Admin')
     .build();
 
   const document = SwaggerModule.createDocument(app, swaggerConfig);

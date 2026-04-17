@@ -27,6 +27,7 @@ import { RoomsModule } from './modules/rooms/rooms.module';
 import { GameEngineModule } from './modules/game-engine/game-engine.module';
 import { MessagingModule } from './modules/messaging/messaging.module';
 import { MatchHistoryModule } from './modules/match-history/match-history.module';
+import { AdminModule } from './modules/admin/admin.module';
 import { AppGateway } from './websocket/gateway';
 
 @Module({
@@ -52,6 +53,7 @@ import { AppGateway } from './websocket/gateway';
     GameEngineModule,
     MessagingModule,
     MatchHistoryModule,
+    AdminModule,
   ],
   providers: [
     AppGateway,
