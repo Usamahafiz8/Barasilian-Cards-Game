@@ -2,16 +2,19 @@
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import toast from 'react-hot-toast';
+import { Eye, EyeOff } from 'lucide-react';
 import api from '@/lib/api';
 import { setToken } from '@/lib/auth';
+import Button from '@/components/ui/Button';
 
 export default function LoginPage() {
   const router = useRouter();
-  const [email, setEmail]       = useState('');
+  const [email,    setEmail]    = useState('');
   const [password, setPassword] = useState('');
-  const [loading, setLoading]   = useState(false);
+  const [show,     setShow]     = useState(false);
+  const [loading,  setLoading]  = useState(false);
 
-  async function handleSubmit(e: React.FormEvent) {
+  async function submit(e: React.FormEvent) {
     e.preventDefault();
     setLoading(true);
     try {
@@ -26,19 +29,23 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-950 px-4">
-      <div className="w-full max-w-sm">
-        {/* Card */}
-        <div className="bg-white rounded-2xl shadow-xl px-8 py-10">
-          <div className="text-center mb-8">
-            <span className="text-5xl">🃏</span>
-            <h1 className="text-xl font-bold text-gray-900 mt-3">Buraco Admin</h1>
-            <p className="text-sm text-gray-500 mt-1">Sign in to your admin account</p>
-          </div>
+    <div className="min-h-screen flex items-center justify-center bg-slate-50 px-4">
+      <div className="w-full max-w-[360px]">
 
-          <form onSubmit={handleSubmit} className="space-y-4">
+        {/* Logo */}
+        <div className="text-center mb-8">
+          <div className="inline-flex items-center justify-center w-12 h-12 bg-blue-600 rounded-2xl text-white text-xl font-bold mb-4">
+            B
+          </div>
+          <h1 className="text-xl font-bold text-slate-900">Buraco Admin</h1>
+          <p className="text-sm text-slate-500 mt-1">Sign in to your admin account</p>
+        </div>
+
+        {/* Card */}
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
+          <form onSubmit={submit} className="space-y-4">
             <div>
-              <label className="block text-xs font-medium text-gray-700 mb-1.5">Email address</label>
+              <label className="text-xs font-medium text-slate-600 block mb-1.5">Email</label>
               <input
                 type="email"
                 required
@@ -46,38 +53,40 @@ export default function LoginPage() {
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder="admin@buraco.game"
-                className="w-full border border-gray-300 rounded-xl px-4 py-2.5 text-sm
-                  focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent
-                  placeholder:text-gray-400"
+                className="block w-full rounded-lg border border-slate-200 px-3 py-2 text-sm
+                  placeholder:text-slate-400 outline-none transition
+                  focus:border-blue-500 focus:ring-1 focus:ring-blue-500 bg-white"
               />
             </div>
 
             <div>
-              <label className="block text-xs font-medium text-gray-700 mb-1.5">Password</label>
-              <input
-                type="password"
-                required
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                className="w-full border border-gray-300 rounded-xl px-4 py-2.5 text-sm
-                  focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              />
+              <label className="text-xs font-medium text-slate-600 block mb-1.5">Password</label>
+              <div className="relative">
+                <input
+                  type={show ? 'text' : 'password'}
+                  required
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  className="block w-full rounded-lg border border-slate-200 px-3 py-2 pr-9 text-sm
+                    outline-none transition focus:border-blue-500 focus:ring-1 focus:ring-blue-500 bg-white"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShow(!show)}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                >
+                  {show ? <EyeOff size={15} /> : <Eye size={15} />}
+                </button>
+              </div>
             </div>
 
-            <button
-              type="submit"
-              disabled={loading}
-              className="w-full bg-blue-600 text-white py-2.5 rounded-xl text-sm font-semibold
-                hover:bg-blue-700 disabled:opacity-50 transition-colors mt-2"
-            >
-              {loading ? 'Signing in…' : 'Sign In'}
-            </button>
+            <Button type="submit" loading={loading} className="w-full justify-center mt-1" size="lg">
+              Sign in
+            </Button>
           </form>
         </div>
 
-        <p className="text-center text-xs text-gray-600 mt-6">
-          Buraco Card Game — Admin Panel
-        </p>
+        <p className="text-center text-xs text-slate-400 mt-6">Buraco Card Game — Admin v1</p>
       </div>
     </div>
   );

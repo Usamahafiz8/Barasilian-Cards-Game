@@ -1,27 +1,29 @@
 import type { Metadata } from 'next';
-import { Inter } from 'next/font/google';
+import { Geist } from 'next/font/google';
 import { Toaster } from 'react-hot-toast';
 import './globals.css';
 
-const inter = Inter({ subsets: ['latin'] });
+const geist = Geist({ subsets: ['latin'], variable: '--font-geist-sans' });
 
 export const metadata: Metadata = {
   title: 'Buraco Admin',
-  description: 'Admin panel for the Buraco card game platform',
+  description: 'Buraco Card Game — Admin Panel',
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en">
-      <body className={`${inter.className} bg-gray-50 min-h-screen`}>
+    <html lang="en" className={geist.variable}>
+      <body>
         {children}
         <Toaster
           position="bottom-right"
           toastOptions={{
             duration: 4000,
-            style: { fontSize: '0.875rem', borderRadius: '0.75rem', maxWidth: '360px' },
-            success: { iconTheme: { primary: '#16a34a', secondary: '#fff' } },
-            error:   { iconTheme: { primary: '#ef4444', secondary: '#fff' } },
+            style: {
+              fontSize: '0.8125rem',
+              borderRadius: '10px',
+              boxShadow: '0 4px 12px rgba(0,0,0,.12)',
+            },
           }}
         />
       </body>

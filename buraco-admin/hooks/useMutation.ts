@@ -3,6 +3,7 @@ import { useState } from 'react';
 export function useMutation() {
   const [loading, setLoading] = useState(false);
 
+  /** Returns true on success, false on error. */
   async function run(fn: () => Promise<unknown>): Promise<boolean> {
     if (loading) return false;
     setLoading(true);

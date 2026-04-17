@@ -7,8 +7,9 @@ import { useMutation } from '@/hooks/useMutation';
 import Badge, { BadgeVariant } from '@/components/ui/Badge';
 import Button from '@/components/ui/Button';
 import Modal from '@/components/ui/Modal';
-import PageHeader from '@/components/ui/PageHeader';
 import Pagination from '@/components/ui/Pagination';
+import { TableSkeleton } from '@/components/ui/Skeleton';
+import Empty from '@/components/ui/Empty';
 
 interface Game {
   id: string;
@@ -19,7 +20,7 @@ interface Game {
   players: { userId: string }[];
 }
 
-const STATUS_VARIANT: Record<string, BadgeVariant> = {
+const STATUS_COLOR: Record<string, BadgeVariant> = {
   WAITING:     'yellow',
   IN_PROGRESS: 'blue',
   COMPLETED:   'green',
@@ -30,112 +31,116 @@ const STATUS_VARIANT: Record<string, BadgeVariant> = {
 const STATUSES = ['WAITING', 'IN_PROGRESS', 'COMPLETED', 'ABANDONED', 'VOIDED'];
 
 export default function GamesPage() {
-  const [page, setPage]         = useState(1);
-  const [statusFilter, setStatus] = useState('');
-  const [voidTarget, setVoidTarget] = useState<Game | null>(null);
-  const [voidReason, setVoidReason] = useState('');
-  const voidMutation = useMutation();
+  const [page,      setPage]      = useState(1);
+  const [status,    setStatus]    = useState('');
+  const [voidGame,  setVoidGame]  = useState<Game | null>(null);
+  const [reason,    setReason]    = useState('');
+  const voidM = useMutation();
 
   const { items: games, totalPages, loading, refetch } = usePaginated<Game>(
     '/admin/games',
-    { page, limit: 20, status: statusFilter || undefined },
+    { page, limit: 20, status: status || undefined },
   );
 
   async function handleVoid() {
-    if (!voidReason.trim()) { toast.error('Please enter a reason.'); return; }
-    const ok = await voidMutation.run(() =>
-      api.patch(`/admin/games/${voidTarget!.id}/void`, { reason: voidReason.trim() }),
+    if (!reason.trim()) { toast.error('Please provide a reason.'); return; }
+    const ok = await voidM.run(() =>
+      api.patch(`/admin/games/${voidGame!.id}/void`, { reason: reason.trim() }),
     );
-    if (ok) {
-      toast.success('Game voided.');
-      setVoidTarget(null);
-      setVoidReason('');
-      refetch();
-    } else toast.error('Failed to void game.');
+    if (ok) { toast.success('Game voided.'); setVoidGame(null); setReason(''); refetch(); }
+    else    toast.error('Failed to void game.');
   }
 
   return (
     <div>
-      <PageHeader title="Game Sessions" subtitle="Monitor and manage active game sessions" />
+      <div className="mb-6">
+        <h1 className="text-xl font-semibold text-slate-900">Games</h1>
+        <p className="text-sm text-slate-500 mt-0.5">Monitor game sessions</p>
+      </div>
 
       {/* Filter */}
-      <div className="mb-6">
+      <div className="mb-5">
         <select
-          value={statusFilter}
+          value={status}
           onChange={(e) => { setStatus(e.target.value); setPage(1); }}
-          className="border border-gray-300 rounded-xl px-4 py-2.5 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+          className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none
+            focus:border-blue-500 focus:ring-1 focus:ring-blue-500 text-slate-700"
         >
-          <option value="">All Statuses</option>
+          <option value="">All statuses</option>
           {STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
         </select>
       </div>
 
-      {/* Table */}
-      <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
+      <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
         {loading ? (
-          <div className="p-8 text-center text-gray-400 text-sm">Loading…</div>
+          <TableSkeleton rows={8} cols={6} />
         ) : games.length === 0 ? (
-          <div className="p-8 text-center text-gray-400 text-sm">No game sessions found.</div>
+          <Empty message="No game sessions found." />
         ) : (
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-gray-100 bg-gray-50">
-                {['Game ID', 'Mode', 'Variant', 'Status', 'Players', 'Started At', ''].map((h) => (
-                  <th key={h} className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-50">
-              {games.map((g) => (
-                <tr key={g.id} className="hover:bg-gray-50/50 transition-colors">
-                  <td className="px-4 py-3 font-mono text-xs text-gray-500">{g.id.slice(0, 8)}…</td>
-                  <td className="px-4 py-3 text-gray-700">{g.mode}</td>
-                  <td className="px-4 py-3 text-gray-700">{g.variant}</td>
-                  <td className="px-4 py-3">
-                    <Badge variant={STATUS_VARIANT[g.status] ?? 'gray'}>{g.status}</Badge>
-                  </td>
-                  <td className="px-4 py-3 text-gray-700">{g.players.length}</td>
-                  <td className="px-4 py-3 text-gray-400 text-xs">
-                    {g.startedAt ? new Date(g.startedAt).toLocaleString() : '—'}
-                  </td>
-                  <td className="px-4 py-3">
-                    {g.status === 'IN_PROGRESS' && (
-                      <button
-                        onClick={() => { setVoidTarget(g); setVoidReason(''); }}
-                        className="text-red-500 hover:underline text-xs font-medium"
-                      >
-                        Void
-                      </button>
-                    )}
-                  </td>
+          <>
+            <table className="w-full text-sm">
+              <thead className="bg-slate-50 border-b border-slate-100">
+                <tr>
+                  {['ID', 'Mode', 'Variant', 'Status', 'Players', 'Started', ''].map((h) => (
+                    <th key={h} className="text-left px-4 py-3 text-[11px] font-semibold text-slate-500 uppercase tracking-wide">{h}</th>
+                  ))}
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-        {!loading && games.length > 0 && (
-          <div className="px-4 pb-4">
-            <Pagination page={page} totalPages={totalPages} onChange={setPage} />
-          </div>
+              </thead>
+              <tbody className="divide-y divide-slate-50">
+                {games.map((g) => (
+                  <tr key={g.id} className="hover:bg-slate-50/60 transition-colors">
+                    <td className="px-4 py-3 font-mono text-xs text-slate-400">{g.id.slice(0, 8)}…</td>
+                    <td className="px-4 py-3 text-slate-700">{g.mode}</td>
+                    <td className="px-4 py-3 text-slate-700">{g.variant}</td>
+                    <td className="px-4 py-3">
+                      <Badge variant={STATUS_COLOR[g.status] ?? 'gray'}>{g.status}</Badge>
+                    </td>
+                    <td className="px-4 py-3 text-slate-700">{g.players.length}</td>
+                    <td className="px-4 py-3 text-slate-400 text-xs">
+                      {g.startedAt ? new Date(g.startedAt).toLocaleString() : '—'}
+                    </td>
+                    <td className="px-4 py-3">
+                      {g.status === 'IN_PROGRESS' && (
+                        <button
+                          onClick={() => { setVoidGame(g); setReason(''); }}
+                          className="text-red-500 hover:underline text-xs font-medium"
+                        >
+                          Void
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <div className="px-4 pb-3">
+              <Pagination page={page} totalPages={totalPages} onChange={setPage} />
+            </div>
+          </>
         )}
       </div>
 
-      {/* Void confirm modal */}
-      {voidTarget && (
-        <Modal title="Void Game" onClose={() => setVoidTarget(null)} size="sm">
-          <p className="text-xs text-gray-400 font-mono mb-4">{voidTarget.id}</p>
+      {voidGame && (
+        <Modal
+          title="Void Game"
+          description={`Game ID: ${voidGame.id}`}
+          onClose={() => setVoidGame(null)}
+          size="sm"
+          footer={
+            <>
+              <Button variant="outline" onClick={() => setVoidGame(null)}>Cancel</Button>
+              <Button variant="danger" loading={voidM.loading} onClick={handleVoid}>Void Game</Button>
+            </>
+          }
+        >
           <input
-            value={voidReason}
-            onChange={(e) => setVoidReason(e.target.value)}
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
             placeholder="Reason for voiding…"
-            className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm mb-4 focus:outline-none focus:ring-2 focus:ring-red-400"
+            className="block w-full rounded-lg border border-slate-200 px-3 py-2 text-sm
+              placeholder:text-slate-400 outline-none transition
+              focus:border-blue-500 focus:ring-1 focus:ring-blue-500 bg-white"
           />
-          <div className="flex gap-2">
-            <Button variant="danger" loading={voidMutation.loading} onClick={handleVoid}>
-              Confirm Void
-            </Button>
-            <Button variant="ghost" onClick={() => setVoidTarget(null)}>Cancel</Button>
-          </div>
         </Modal>
       )}
     </div>
