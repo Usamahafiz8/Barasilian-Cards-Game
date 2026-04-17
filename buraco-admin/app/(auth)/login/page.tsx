@@ -1,8 +1,8 @@
 'use client';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import api from '@/lib/api';
-import { setToken } from '@/lib/auth';
+import { setToken, isAuthenticated } from '@/lib/auth';
 
 export default function LoginPage() {
   const router = useRouter();
@@ -11,6 +11,10 @@ export default function LoginPage() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
+  useEffect(() => {
+    if (isAuthenticated()) router.replace('/');
+  }, [router]);
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError('');
@@ -18,7 +22,7 @@ export default function LoginPage() {
     try {
       const res = await api.post('/admin/auth/login', { email, password });
       setToken(res.data.data.accessToken);
-      router.push('/');
+      router.replace('/');
     } catch {
       setError('Invalid email or password.');
     } finally {
