@@ -125,6 +125,14 @@ export class AdminController {
 
   // ─── Shop ─────────────────────────────────────────────────────────────────
 
+  @Get('shop/items')
+  @UseGuards(AdminJwtGuard)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'List all shop items' })
+  listShopItems(@Query('page') page = 1, @Query('limit') limit = 50) {
+    return this.adminService.listShopItems(+page, +limit);
+  }
+
   @Post('shop/items')
   @UseGuards(AdminJwtGuard, AdminRolesGuard)
   @AdminRoles(AdminRole.SUPER_ADMIN)

@@ -176,6 +176,14 @@ export class AdminService {
 
   // ─── Shop Management ──────────────────────────────────────────────────────
 
+  async listShopItems(page: number, limit: number) {
+    const [data, total] = await Promise.all([
+      this.prisma.shopItem.findMany({ skip: (page - 1) * limit, take: limit, orderBy: { createdAt: 'desc' } }),
+      this.prisma.shopItem.count(),
+    ]);
+    return { data, total, page, limit, totalPages: Math.ceil(total / limit) };
+  }
+
   async createShopItem(adminId: string, dto: CreateShopItemDto) {
     const item = await this.prisma.shopItem.create({ data: dto });
     await this.audit(adminId, 'CREATE_SHOP_ITEM', 'ShopItem', item.id, { name: dto.name });

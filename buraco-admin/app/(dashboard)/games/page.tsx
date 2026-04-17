@@ -34,7 +34,8 @@ export default function GamesPage() {
   const load = useCallback((p: number, s: string) => {
     setLoading(true);
     api.get('/admin/games', { params: { page: p, limit: 20, status: s || undefined } })
-      .then((r) => { setGames(r.data.data.data); setTotalPages(r.data.data.totalPages); })
+      .then((r) => { setGames(r.data.data.data ?? []); setTotalPages(r.data.data.totalPages ?? 1); })
+      .catch(() => { setGames([]); setTotalPages(1); })
       .finally(() => setLoading(false));
   }, []);
 
