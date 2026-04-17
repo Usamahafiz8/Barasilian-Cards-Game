@@ -20,7 +20,9 @@ export default function LoginPage() {
     try {
       const res = await api.post('/admin/auth/login', { email, password });
       setToken(res.data.data.accessToken);
-      router.replace('/');
+      // Hard navigation so the browser sends the new cookie with the next request.
+      // router.replace() is a soft nav that can race with cookie propagation.
+      window.location.href = '/';
     } catch {
       toast.error('Invalid email or password.');
     } finally {
@@ -30,7 +32,7 @@ export default function LoginPage() {
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-slate-50 px-4">
-      <div className="w-full max-w-[360px]">
+      <div className="w-full max-w-90">
 
         {/* Logo */}
         <div className="text-center mb-8">
