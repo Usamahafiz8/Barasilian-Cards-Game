@@ -1,0 +1,742 @@
+# Database Schema — Prisma
+
+**Database:** PostgreSQL  
+**ORM:** Prisma  
+**File:** `prisma/schema.prisma`
+
+---
+
+## Full Prisma Schema
+
+```prisma
+// prisma/schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────
+// ENUMS
+// ─────────────────────────────────────────────
+
+enum AuthProvider {
+  EMAIL
+  GOOGLE
+  APPLE
+}
+
+enum SubscriptionStatus {
+  FREE
+  BASIC
+  PREMIUM
+}
+
+enum FriendshipStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
+}
+
+enum ClubMode {
+  CLASSIC
+  PROFESSIONAL
+}
+
+enum ClubType {
+  OPEN
+  REQUEST_BASED
+}
+
+enum ClubRole {
+  LEADER
+  VICE_LEADER
+  MEMBER
+}
+
+enum MemberStatus {
+  ACTIVE
+  PENDING
+}
+
+enum ConversationType {
+  DIRECT
+  CLUB
+}
+
+enum MessageType {
+  TEXT
+  VOICE
+}
+
+enum ShopCategory {
+  HOME
+  SUBSCRIPTIONS
+  COINS
+  EMOJIS
+  TABLES
+  CARDS
+  SPECIAL
+  REDEEM
+}
+
+enum CurrencyType {
+  COINS
+  DIAMONDS
+}
+
+enum TransactionType {
+  REWARD
+  PURCHASE
+  ENTRY_FEE
+  ENTRY_FEE_REFUND
+  GIFT_SENT
+  GIFT_RECEIVED
+  MISSION_REWARD
+  MANUAL_CREDIT
+  MANUAL_DEDUCT
+  SUBSCRIPTION
+}
+
+enum MissionType {
+  DAILY
+  WEEKLY
+}
+
+enum MissionRequirement {
+  PLAY_GAMES
+  WIN_GAMES
+  EARN_POINTS
+  SEND_MESSAGES
+  JOIN_CLUB
+  PLAY_CLASSIC
+  PLAY_PROFESSIONAL
+  WIN_STREAK
+}
+
+enum NotificationType {
+  FRIEND_REQUEST
+  FRIEND_ACCEPTED
+  CLUB_INVITE
+  CLUB_UPDATE
+  CLUB_REQUEST_ACCEPTED
+  CLUB_REQUEST_DECLINED
+  REWARD
+  MATCH_INVITE
+  SYSTEM
+  BROADCAST
+}
+
+enum GameMode {
+  CLASSIC
+  PROFESSIONAL
+}
+
+enum GameVariant {
+  ONE_VS_ONE
+  TWO_VS_TWO
+}
+
+enum RoomStatus {
+  EMPTY
+  WAITING
+  READY
+  IN_PROGRESS
+  FULL
+}
+
+enum GameStatus {
+  WAITING
+  IN_PROGRESS
+  COMPLETED
+  ABANDONED
+  VOIDED
+}
+
+enum MoveType {
+  DRAW_STOCK
+  DRAW_DISCARD
+  PLAY_MELD
+  ADD_TO_MELD
+  DISCARD
+  PICKUP_POT
+}
+
+enum RankingType {
+  CLASSIC
+  INTERNATIONAL
+}
+
+enum AdminRole {
+  SUPER_ADMIN
+  MODERATOR
+  SUPPORT
+}
+
+// ─────────────────────────────────────────────
+// USERS & AUTH
+// ─────────────────────────────────────────────
+
+model User {
+  id                 String             @id @default(uuid())
+  email              String?            @unique
+  passwordHash       String?
+  googleId           String?            @unique
+  appleId            String?            @unique
+  username           String             @unique
+  avatarUrl          String?
+  registrationDate   DateTime           @default(now())
+  coins              Int                @default(1000)
+  diamonds           Int                @default(0)
+  lives              Int                @default(5)
+  subscriptionStatus SubscriptionStatus @default(FREE)
+  subscriptionExpiry DateTime?
+  isBanned           Boolean            @default(false)
+  banReason          String?
+  isDeleted          Boolean            @default(false)
+  deletedAt          DateTime?
+  lastSeenAt         DateTime?
+  fcmToken           String?            // push notification token
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  // Relations
+  stats              PlayerStats?
+  sentFriendships    Friendship[]       @relation("SentFriendships")
+  receivedFriendships Friendship[]      @relation("ReceivedFriendships")
+  blocksGiven        Block[]            @relation("BlocksGiven")
+  blocksReceived     Block[]            @relation("BlocksReceived")
+  clubMemberships    ClubMember[]
+  transactions       Transaction[]
+  missionProgress    MissionProgress[]
+  inventory          Inventory[]
+  notifications      Notification[]
+  matchPlayers       MatchPlayer[]
+  gamePlayers        GamePlayer[]
+  refreshTokens      RefreshToken[]
+  adminNotes         AdminNote[]
+  conversationMembers ConversationMember[]
+  messages           Message[]
+
+  @@map("users")
+}
+
+model RefreshToken {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@map("refresh_tokens")
+}
+
+// ─────────────────────────────────────────────
+// PLAYER STATS
+// ─────────────────────────────────────────────
+
+model PlayerStats {
+  id              String   @id @default(uuid())
+  userId          String   @unique
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  points          Int      @default(0)
+  level           Int      @default(1)
+  experience      Int      @default(0)
+  gamesPlayed     Int      @default(0)
+  wins            Int      @default(0)
+  losses          Int      @default(0)
+  gamesLeft       Int      @default(0)
+  winStreak       Int      @default(0)
+  bestWinStreak   Int      @default(0)
+  winPercentage   Float    @default(0.0)
+  updatedAt       DateTime @updatedAt
+
+  @@map("player_stats")
+}
+
+// ─────────────────────────────────────────────
+// ECONOMY
+// ─────────────────────────────────────────────
+
+model Transaction {
+  id            String          @id @default(uuid())
+  userId        String
+  user          User            @relation(fields: [userId], references: [id])
+  type          TransactionType
+  currency      CurrencyType
+  amount        Int
+  balanceBefore Int
+  balanceAfter  Int
+  referenceId   String?         // matchId, shopItemId, missionId, etc.
+  description   String?
+  performedBy   String?         // adminId if manual
+  createdAt     DateTime        @default(now())
+
+  @@index([userId])
+  @@index([createdAt])
+  @@map("transactions")
+}
+
+// ─────────────────────────────────────────────
+// FRIENDS & SOCIAL
+// ─────────────────────────────────────────────
+
+model Friendship {
+  id         String           @id @default(uuid())
+  senderId   String
+  receiverId String
+  sender     User             @relation("SentFriendships", fields: [senderId], references: [id])
+  receiver   User             @relation("ReceivedFriendships", fields: [receiverId], references: [id])
+  status     FriendshipStatus @default(PENDING)
+  createdAt  DateTime         @default(now())
+  updatedAt  DateTime         @updatedAt
+
+  @@unique([senderId, receiverId])
+  @@map("friendships")
+}
+
+model Block {
+  id        String   @id @default(uuid())
+  blockerId String
+  blockedId String
+  blocker   User     @relation("BlocksGiven", fields: [blockerId], references: [id])
+  blocked   User     @relation("BlocksReceived", fields: [blockedId], references: [id])
+  createdAt DateTime @default(now())
+
+  @@unique([blockerId, blockedId])
+  @@map("blocks")
+}
+
+// ─────────────────────────────────────────────
+// CLUBS
+// ─────────────────────────────────────────────
+
+model Club {
+  id             String     @id @default(uuid())
+  name           String     @unique
+  iconUrl        String?
+  welcomeMessage String?
+  mode           ClubMode   @default(CLASSIC)
+  type           ClubType   @default(OPEN)
+  minPoints      Int        @default(0)
+  level          Int        @default(1)
+  points         Int        @default(0)
+  memberCount    Int        @default(0)
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+
+  members        ClubMember[]
+  conversation   Conversation?
+
+  @@map("clubs")
+}
+
+model ClubMember {
+  id       String       @id @default(uuid())
+  clubId   String
+  userId   String
+  club     Club         @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  user     User         @relation(fields: [userId], references: [id])
+  role     ClubRole     @default(MEMBER)
+  status   MemberStatus @default(ACTIVE)
+  joinedAt DateTime     @default(now())
+
+  @@unique([clubId, userId])
+  @@map("club_members")
+}
+
+// ─────────────────────────────────────────────
+// MESSAGING
+// ─────────────────────────────────────────────
+
+model Conversation {
+  id        String           @id @default(uuid())
+  type      ConversationType
+  clubId    String?          @unique
+  club      Club?            @relation(fields: [clubId], references: [id])
+  createdAt DateTime         @default(now())
+
+  messages  Message[]
+  members   ConversationMember[]
+
+  @@map("conversations")
+}
+
+model ConversationMember {
+  id             String       @id @default(uuid())
+  conversationId String
+  userId         String
+  conversation   Conversation @relation(fields: [conversationId], references: [id])
+  user           User         @relation(fields: [userId], references: [id])
+  joinedAt       DateTime     @default(now())
+
+  @@unique([conversationId, userId])
+  @@map("conversation_members")
+}
+
+model Message {
+  id             String       @id @default(uuid())
+  conversationId String
+  senderId       String
+  conversation   Conversation @relation(fields: [conversationId], references: [id])
+  sender         User         @relation(fields: [senderId], references: [id])
+  type           MessageType  @default(TEXT)
+  content        String?
+  voiceUrl       String?
+  duration       Int?         // voice duration in seconds
+  isRead         Boolean      @default(false)
+  createdAt      DateTime     @default(now())
+
+  @@index([conversationId])
+  @@index([createdAt])
+  @@map("messages")
+}
+
+// ─────────────────────────────────────────────
+// MISSIONS
+// ─────────────────────────────────────────────
+
+model Mission {
+  id              String             @id @default(uuid())
+  title           String
+  description     String
+  type            MissionType
+  requirement     MissionRequirement
+  targetValue     Int
+  rewardCoins     Int                @default(0)
+  rewardDiamonds  Int                @default(0)
+  isActive        Boolean            @default(true)
+  createdAt       DateTime           @default(now())
+
+  progress        MissionProgress[]
+
+  @@map("missions")
+}
+
+model MissionProgress {
+  id           String    @id @default(uuid())
+  userId       String
+  missionId    String
+  user         User      @relation(fields: [userId], references: [id])
+  mission      Mission   @relation(fields: [missionId], references: [id])
+  currentValue Int       @default(0)
+  isCompleted  Boolean   @default(false)
+  isClaimed    Boolean   @default(false)
+  assignedAt   DateTime  @default(now())
+  claimedAt    DateTime?
+
+  @@unique([userId, missionId])
+  @@map("mission_progress")
+}
+
+// ─────────────────────────────────────────────
+// SHOP & INVENTORY
+// ─────────────────────────────────────────────
+
+model ShopItem {
+  id            String       @id @default(uuid())
+  name          String
+  description   String?
+  category      ShopCategory
+  priceCoins    Int?
+  priceDiamonds Int?
+  imageUrl      String?
+  isActive      Boolean      @default(true)
+  isConsumable  Boolean      @default(false)
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  inventory     Inventory[]
+
+  @@map("shop_items")
+}
+
+model Inventory {
+  id          String    @id @default(uuid())
+  userId      String
+  itemId      String
+  user        User      @relation(fields: [userId], references: [id])
+  item        ShopItem  @relation(fields: [itemId], references: [id])
+  quantity    Int       @default(1)
+  isEquipped  Boolean   @default(false)
+  equippedAt  DateTime?
+  purchasedAt DateTime  @default(now())
+
+  @@unique([userId, itemId])
+  @@map("inventory")
+}
+
+model PromoCode {
+  id          String    @id @default(uuid())
+  code        String    @unique
+  rewardCoins Int       @default(0)
+  rewardDiamonds Int    @default(0)
+  itemId      String?
+  maxUses     Int?
+  usedCount   Int       @default(0)
+  expiresAt   DateTime?
+  isActive    Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+
+  @@map("promo_codes")
+}
+
+// ─────────────────────────────────────────────
+// NOTIFICATIONS
+// ─────────────────────────────────────────────
+
+model Notification {
+  id        String           @id @default(uuid())
+  userId    String
+  user      User             @relation(fields: [userId], references: [id])
+  type      NotificationType
+  title     String
+  body      String
+  data      Json?
+  isRead    Boolean          @default(false)
+  createdAt DateTime         @default(now())
+
+  @@index([userId])
+  @@index([isRead])
+  @@map("notifications")
+}
+
+// ─────────────────────────────────────────────
+// MATCHMAKING
+// ─────────────────────────────────────────────
+
+model MatchmakingEntry {
+  id        String      @id @default(uuid())
+  userId    String      @unique
+  mode      GameMode
+  variant   GameVariant
+  joinedAt  DateTime    @default(now())
+
+  @@map("matchmaking_entries")
+}
+
+// ─────────────────────────────────────────────
+// ROOMS
+// ─────────────────────────────────────────────
+
+model Room {
+  id             String      @id @default(uuid())
+  mode           GameMode
+  variant        GameVariant
+  status         RoomStatus  @default(EMPTY)
+  maxPlayers     Int
+  currentPlayers Int         @default(0)
+  turnDuration   Int         @default(30)
+  minLevel       Int?
+  minPoints      Int?
+  entryFeeCoins  Int         @default(0)
+  gameId         String?     @unique
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  game           GameSession? @relation(fields: [gameId], references: [id])
+
+  @@map("rooms")
+}
+
+// ─────────────────────────────────────────────
+// GAME ENGINE
+// ─────────────────────────────────────────────
+
+model GameSession {
+  id          String      @id @default(uuid())
+  roomId      String      @unique
+  mode        GameMode
+  variant     GameVariant
+  status      GameStatus  @default(WAITING)
+  winnerIds   String[]
+  winnerTeam  Int?
+  voidReason  String?
+  voidedBy    String?
+  startedAt   DateTime?
+  endedAt     DateTime?
+  duration    Int?        // seconds
+  createdAt   DateTime    @default(now())
+
+  players     GamePlayer[]
+  moves       GameMove[]
+  matchRecord MatchRecord?
+  room        Room?
+
+  @@map("game_sessions")
+}
+
+model GamePlayer {
+  id         String      @id @default(uuid())
+  gameId     String
+  userId     String
+  game       GameSession @relation(fields: [gameId], references: [id])
+  user       User        @relation(fields: [userId], references: [id])
+  teamId     Int
+  finalScore Int?
+  result     String?     // WIN, LOSS, ABANDONED
+
+  @@unique([gameId, userId])
+  @@map("game_players")
+}
+
+model GameMove {
+  id          String      @id @default(uuid())
+  gameId      String
+  playerId    String
+  game        GameSession @relation(fields: [gameId], references: [id])
+  turnNumber  Int
+  moveType    MoveType
+  cardData    Json
+  isValid     Boolean     @default(true)
+  timestamp   DateTime    @default(now())
+
+  @@index([gameId])
+  @@map("game_moves")
+}
+
+// ─────────────────────────────────────────────
+// MATCH HISTORY
+// ─────────────────────────────────────────────
+
+model MatchRecord {
+  id         String      @id @default(uuid())
+  gameId     String      @unique
+  game       GameSession @relation(fields: [gameId], references: [id])
+  mode       GameMode
+  variant    GameVariant
+  winnerIds  String[]
+  winnerTeam Int?
+  scores     Json        // { "userId": finalScore }
+  duration   Int
+  playedAt   DateTime    @default(now())
+
+  players    MatchPlayer[]
+
+  @@index([playedAt])
+  @@map("match_records")
+}
+
+model MatchPlayer {
+  id        String      @id @default(uuid())
+  matchId   String
+  userId    String
+  match     MatchRecord @relation(fields: [matchId], references: [id])
+  user      User        @relation(fields: [userId], references: [id])
+  teamId    Int
+  score     Int
+  result    String      // WIN, LOSS
+
+  @@unique([matchId, userId])
+  @@map("match_players")
+}
+
+// ─────────────────────────────────────────────
+// ADMIN
+// ─────────────────────────────────────────────
+
+model AdminUser {
+  id           String    @id @default(uuid())
+  email        String    @unique
+  passwordHash String
+  name         String
+  role         AdminRole @default(SUPPORT)
+  isActive     Boolean   @default(true)
+  createdAt    DateTime  @default(now())
+  lastLoginAt  DateTime?
+
+  auditLogs    AdminAuditLog[]
+
+  @@map("admin_users")
+}
+
+model AdminAuditLog {
+  id          String    @id @default(uuid())
+  adminId     String
+  admin       AdminUser @relation(fields: [adminId], references: [id])
+  action      String    // BAN_USER, CREDIT_COINS, VOID_MATCH, etc.
+  targetType  String    // USER, MATCH, CLUB, etc.
+  targetId    String
+  details     Json?
+  createdAt   DateTime  @default(now())
+
+  @@index([adminId])
+  @@index([createdAt])
+  @@map("admin_audit_logs")
+}
+
+model AdminNote {
+  id        String    @id @default(uuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id])
+  adminId   String
+  content   String
+  createdAt DateTime  @default(now())
+
+  @@map("admin_notes")
+}
+
+model SystemConfig {
+  id        String   @id @default(uuid())
+  key       String   @unique
+  value     String
+  updatedAt DateTime @updatedAt
+  updatedBy String?
+
+  @@map("system_config")
+}
+```
+
+---
+
+## Redis Key Structure
+
+| Key Pattern | Type | TTL | Purpose |
+|-------------|------|-----|---------|
+| `session:{userId}` | String | 15m | Active session marker |
+| `blacklist:{token}` | String | token TTL | Revoked JWT tokens |
+| `game:{gameId}:state` | JSON String | 24h | Active game state |
+| `disconnect:{userId}:{gameId}` | String | 60s | Disconnect timeout tracking |
+| `queue:classic:1v1` | Sorted Set | — | Matchmaking queue (score = timestamp) |
+| `queue:classic:2v2` | Sorted Set | — | |
+| `queue:professional:1v1` | Sorted Set | — | |
+| `queue:professional:2v2` | Sorted Set | — | |
+| `ranking:classic` | Sorted Set | — | Classic ranking (score = points) |
+| `ranking:international` | Sorted Set | — | International ranking |
+| `online:{userId}` | String | 30s | Presence (refreshed on ping) |
+| `otp:{email}` | String | 10m | Password reset OTP |
+| `rate:{ip}:{endpoint}` | Counter | 60s | Rate limiting |
+
+---
+
+## Indexes Summary
+
+| Table | Index | Reason |
+|-------|-------|--------|
+| users | email, username | Auth lookups |
+| transactions | userId, createdAt | History queries |
+| messages | conversationId, createdAt | Chat pagination |
+| notifications | userId, isRead | Unread queries |
+| match_records | playedAt | History pagination |
+| game_moves | gameId | Move log queries |
+| admin_audit_logs | adminId, createdAt | Admin history |
+
+---
+
+## Migration Strategy
+
+1. Run `prisma migrate dev --name init` for initial schema
+2. Each new feature gets its own named migration
+3. Never modify existing migrations — always create new ones
+4. All enum changes use `prisma migrate dev` with explicit casting
+5. Seed file at `prisma/seed.ts` populates:
+   - Default system config values
+   - Predefined avatars catalog
+   - Default shop items
+   - Sample missions (daily + weekly)
+   - Super admin account
