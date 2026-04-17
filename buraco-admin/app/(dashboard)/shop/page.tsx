@@ -1,7 +1,13 @@
 'use client';
-import { useCallback, useEffect, useState } from 'react';
+import { useState } from 'react';
+import toast from 'react-hot-toast';
 import api from '@/lib/api';
-import Toast from '@/components/ui/Toast';
+import { useFetch } from '@/hooks/useFetch';
+import { useMutation } from '@/hooks/useMutation';
+import Badge from '@/components/ui/Badge';
+import Button from '@/components/ui/Button';
+import Modal from '@/components/ui/Modal';
+import PageHeader from '@/components/ui/PageHeader';
 
 interface ShopItem {
   id: string;
@@ -14,199 +20,119 @@ interface ShopItem {
 }
 
 const CATEGORIES = ['HOME', 'SUBSCRIPTIONS', 'COINS', 'EMOJIS', 'TABLES', 'CARDS', 'SPECIAL', 'REDEEM'];
-const emptyForm = { name: '', category: 'CARDS', priceCoins: '', priceDiamonds: '', isConsumable: false, description: '' };
+const INPUT = 'w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500';
+const EMPTY_FORM = { name: '', category: 'CARDS', priceCoins: '', priceDiamonds: '', isConsumable: false, description: '' };
 
 export default function ShopPage() {
-  const [items, setItems] = useState<ShopItem[]>([]);
-  const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
-  const [form, setForm] = useState(emptyForm);
-  const [submitting, setSubmitting] = useState(false);
-  const [toggling, setToggling] = useState<string | null>(null);
-  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+  const [form, setForm] = useState(EMPTY_FORM);
+  const createMutation = useMutation();
+  const toggleMutation = useMutation();
 
-  const loadItems = useCallback(() => {
-    setLoading(true);
-    api.get('/admin/shop/items', { params: { limit: 100 } })
-      .then((r) => setItems(r.data.data.data ?? r.data.data ?? []))
-      .catch(() => {
-        setItems([]);
-        setToast({ message: 'Failed to load shop items.', type: 'error' });
-      })
-      .finally(() => setLoading(false));
-  }, []);
-
-  useEffect(() => { loadItems(); }, [loadItems]);
+  const { data, loading, refetch } = useFetch<{ data: ShopItem[] }>('/admin/shop/items', { limit: 100 });
+  const items = data?.data ?? (data as unknown as ShopItem[]) ?? [];
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
-    if (submitting) return;
-    setSubmitting(true);
-    try {
-      await api.post('/admin/shop/items', {
-        name: form.name.trim(),
-        category: form.category,
-        description: form.description.trim() || undefined,
-        priceCoins: form.priceCoins ? parseInt(form.priceCoins) : undefined,
+    const ok = await createMutation.run(() =>
+      api.post('/admin/shop/items', {
+        name:          form.name.trim(),
+        category:      form.category,
+        description:   form.description.trim() || undefined,
+        priceCoins:    form.priceCoins    ? parseInt(form.priceCoins)    : undefined,
         priceDiamonds: form.priceDiamonds ? parseInt(form.priceDiamonds) : undefined,
-        isConsumable: form.isConsumable,
-      });
-      setShowCreate(false);
-      setForm(emptyForm);
-      setToast({ message: 'Shop item created.', type: 'success' });
-      loadItems();
-    } catch {
-      setToast({ message: 'Failed to create shop item.', type: 'error' });
-    } finally {
-      setSubmitting(false);
-    }
+        isConsumable:  form.isConsumable,
+      }),
+    );
+    if (ok) { toast.success('Item created.'); setShowCreate(false); setForm(EMPTY_FORM); refetch(); }
+    else toast.error('Failed to create item.');
   }
 
   async function toggleItem(item: ShopItem) {
-    if (toggling) return;
-    setToggling(item.id);
-    try {
-      await api.patch(`/admin/shop/items/${item.id}/toggle`, { isActive: !item.isActive });
-      setToast({ message: `"${item.name}" ${item.isActive ? 'deactivated' : 'activated'}.`, type: 'success' });
-      loadItems();
-    } catch {
-      setToast({ message: 'Failed to update item status.', type: 'error' });
-    } finally {
-      setToggling(null);
-    }
+    const ok = await toggleMutation.run(() =>
+      api.patch(`/admin/shop/items/${item.id}/toggle`, { isActive: !item.isActive }),
+    );
+    if (ok) { toast.success(`"${item.name}" ${item.isActive ? 'deactivated' : 'activated'}.`); refetch(); }
+    else toast.error('Failed to update item.');
   }
 
   return (
     <div>
-      <div className="flex items-center justify-between mb-6">
-        <h2 className="text-2xl font-bold text-gray-900">Shop Items</h2>
-        <button
-          onClick={() => setShowCreate(true)}
-          className="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-blue-700"
-        >
-          + New Item
-        </button>
+      <PageHeader
+        title="Shop Items"
+        subtitle="Manage purchasable items and their prices"
+        action={<Button onClick={() => setShowCreate(true)}>+ New Item</Button>}
+      />
+
+      <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
+        {loading ? (
+          <div className="p-8 text-center text-gray-400 text-sm">Loading…</div>
+        ) : items.length === 0 ? (
+          <div className="p-8 text-center text-gray-400 text-sm">No shop items yet.</div>
+        ) : (
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-gray-100 bg-gray-50">
+                {['Name', 'Category', 'Coins', 'Diamonds', 'Type', 'Status', ''].map((h) => (
+                  <th key={h} className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-50">
+              {items.map((item) => (
+                <tr key={item.id} className="hover:bg-gray-50/50 transition-colors">
+                  <td className="px-4 py-3 font-medium text-gray-900">{item.name}</td>
+                  <td className="px-4 py-3"><Badge variant="blue">{item.category}</Badge></td>
+                  <td className="px-4 py-3 text-gray-700">{item.priceCoins?.toLocaleString() ?? '—'}</td>
+                  <td className="px-4 py-3 text-gray-700">{item.priceDiamonds?.toLocaleString() ?? '—'}</td>
+                  <td className="px-4 py-3">
+                    <Badge variant={item.isConsumable ? 'purple' : 'gray'}>
+                      {item.isConsumable ? 'Consumable' : 'Permanent'}
+                    </Badge>
+                  </td>
+                  <td className="px-4 py-3">
+                    <Badge variant={item.isActive ? 'green' : 'gray'}>
+                      {item.isActive ? 'Active' : 'Inactive'}
+                    </Badge>
+                  </td>
+                  <td className="px-4 py-3">
+                    <button
+                      onClick={() => toggleItem(item)}
+                      disabled={toggleMutation.loading}
+                      className={`text-xs font-medium hover:underline disabled:opacity-50 ${item.isActive ? 'text-red-500' : 'text-green-600'}`}
+                    >
+                      {item.isActive ? 'Deactivate' : 'Activate'}
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </div>
 
-      {loading ? (
-        <div className="text-gray-500">Loading...</div>
-      ) : (
-        <div className="bg-white rounded-xl shadow overflow-hidden">
-          {items.length === 0 ? (
-            <div className="text-gray-400 p-8 text-center">No shop items yet.</div>
-          ) : (
-            <table className="w-full text-sm">
-              <thead className="bg-gray-50 border-b">
-                <tr>
-                  {['Name', 'Category', 'Coins', 'Diamonds', 'Type', 'Status', 'Actions'].map((h) => (
-                    <th key={h} className="text-left px-4 py-3 text-gray-600 font-medium">{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100">
-                {items.map((item) => (
-                  <tr key={item.id} className="hover:bg-gray-50">
-                    <td className="px-4 py-3 font-medium">{item.name}</td>
-                    <td className="px-4 py-3 text-gray-500">{item.category}</td>
-                    <td className="px-4 py-3">{item.priceCoins?.toLocaleString() ?? '—'}</td>
-                    <td className="px-4 py-3">{item.priceDiamonds?.toLocaleString() ?? '—'}</td>
-                    <td className="px-4 py-3">{item.isConsumable ? 'Consumable' : 'Permanent'}</td>
-                    <td className="px-4 py-3">
-                      <span className={`px-2 py-0.5 rounded text-xs font-medium ${item.isActive ? 'bg-green-100 text-green-600' : 'bg-gray-100 text-gray-500'}`}>
-                        {item.isActive ? 'Active' : 'Inactive'}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3">
-                      <button
-                        onClick={() => toggleItem(item)}
-                        disabled={toggling === item.id}
-                        className={`text-xs hover:underline disabled:opacity-50 ${item.isActive ? 'text-red-500' : 'text-green-600'}`}
-                      >
-                        {toggling === item.id ? '…' : item.isActive ? 'Deactivate' : 'Activate'}
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </div>
-      )}
-
       {showCreate && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-xl p-6 w-full max-w-md">
-            <h3 className="font-bold text-lg mb-4">Create Shop Item</h3>
-            <form onSubmit={handleCreate} className="space-y-3">
-              <input
-                required
-                value={form.name}
-                onChange={(e) => setForm({ ...form, name: e.target.value })}
-                placeholder="Name"
-                className="border rounded px-3 py-2 text-sm w-full focus:outline-none focus:ring-2 focus:ring-blue-500"
-              />
-              <input
-                value={form.description}
-                onChange={(e) => setForm({ ...form, description: e.target.value })}
-                placeholder="Description (optional)"
-                className="border rounded px-3 py-2 text-sm w-full focus:outline-none focus:ring-2 focus:ring-blue-500"
-              />
-              <select
-                value={form.category}
-                onChange={(e) => setForm({ ...form, category: e.target.value })}
-                className="border rounded px-3 py-2 text-sm w-full focus:outline-none focus:ring-2 focus:ring-blue-500"
-              >
-                {CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
-              </select>
-              <div className="flex gap-2">
-                <input
-                  type="number"
-                  min="0"
-                  value={form.priceCoins}
-                  onChange={(e) => setForm({ ...form, priceCoins: e.target.value })}
-                  placeholder="Price (Coins)"
-                  className="border rounded px-3 py-2 text-sm flex-1 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                />
-                <input
-                  type="number"
-                  min="0"
-                  value={form.priceDiamonds}
-                  onChange={(e) => setForm({ ...form, priceDiamonds: e.target.value })}
-                  placeholder="Price (Diamonds)"
-                  className="border rounded px-3 py-2 text-sm flex-1 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                />
-              </div>
-              <label className="flex items-center gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  checked={form.isConsumable}
-                  onChange={(e) => setForm({ ...form, isConsumable: e.target.checked })}
-                />
-                Consumable
-              </label>
-              <div className="flex gap-2 pt-2">
-                <button
-                  type="submit"
-                  disabled={submitting}
-                  className="bg-blue-600 text-white px-4 py-2 rounded text-sm hover:bg-blue-700 disabled:opacity-50"
-                >
-                  {submitting ? 'Creating…' : 'Create'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => { setShowCreate(false); setForm(emptyForm); }}
-                  className="text-gray-500 px-4 py-2 rounded text-sm hover:bg-gray-100"
-                >
-                  Cancel
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {toast && (
-        <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />
+        <Modal title="Create Shop Item" onClose={() => { setShowCreate(false); setForm(EMPTY_FORM); }}>
+          <form onSubmit={handleCreate} className="space-y-3">
+            <input required value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Item name" className={INPUT} />
+            <input value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="Description (optional)" className={INPUT} />
+            <select value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} className={INPUT}>
+              {CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
+            <div className="grid grid-cols-2 gap-2">
+              <input type="number" min="0" value={form.priceCoins} onChange={(e) => setForm({ ...form, priceCoins: e.target.value })} placeholder="Coins price" className={INPUT} />
+              <input type="number" min="0" value={form.priceDiamonds} onChange={(e) => setForm({ ...form, priceDiamonds: e.target.value })} placeholder="Diamonds price" className={INPUT} />
+            </div>
+            <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+              <input type="checkbox" checked={form.isConsumable} onChange={(e) => setForm({ ...form, isConsumable: e.target.checked })} className="rounded" />
+              Consumable item
+            </label>
+            <div className="flex gap-2 pt-1">
+              <Button type="submit" loading={createMutation.loading}>Create</Button>
+              <Button type="button" variant="ghost" onClick={() => { setShowCreate(false); setForm(EMPTY_FORM); }}>Cancel</Button>
+            </div>
+          </form>
+        </Modal>
       )}
     </div>
   );

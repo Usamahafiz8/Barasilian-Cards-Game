@@ -1,67 +1,70 @@
 'use client';
 import { useState } from 'react';
+import toast from 'react-hot-toast';
 import api from '@/lib/api';
+import { useMutation } from '@/hooks/useMutation';
+import Button from '@/components/ui/Button';
+import PageHeader from '@/components/ui/PageHeader';
+
+const INPUT = 'w-full border border-gray-300 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500';
 
 export default function BroadcastPage() {
-  const [form, setForm] = useState({ title: '', body: '' });
-  const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<{ message: string; ok: boolean } | null>(null);
+  const [form, setForm]   = useState({ title: '', body: '' });
+  const { run, loading }  = useMutation();
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (loading) return;
-    setLoading(true);
-    setResult(null);
-    try {
-      const res = await api.post('/admin/broadcast', form);
-      setResult({ message: res.data.data?.message ?? 'Broadcast sent successfully.', ok: true });
+    const ok = await run(() => api.post('/admin/broadcast', form));
+    if (ok) {
+      toast.success('Broadcast sent to all users.');
       setForm({ title: '', body: '' });
-    } catch {
-      setResult({ message: 'Failed to send broadcast. Please try again.', ok: false });
-    } finally {
-      setLoading(false);
+    } else {
+      toast.error('Failed to send broadcast.');
     }
   }
 
   return (
     <div>
-      <h2 className="text-2xl font-bold text-gray-900 mb-6">Broadcast Notification</h2>
-      <div className="bg-white rounded-xl shadow p-6 max-w-lg">
-        <p className="text-sm text-gray-500 mb-4">Send a push notification to all active users.</p>
+      <PageHeader title="Broadcast" subtitle="Send a push notification to all active players" />
+
+      <div className="max-w-lg bg-white rounded-2xl border border-gray-100 shadow-sm p-6">
+        <div className="flex items-start gap-3 mb-6 p-4 bg-yellow-50 border border-yellow-200 rounded-xl">
+          <span className="text-yellow-500 text-lg mt-0.5">⚠</span>
+          <p className="text-sm text-yellow-700">
+            This will send a push notification to <strong>all</strong> registered users.
+            Use carefully.
+          </p>
+        </div>
+
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Title</label>
+            <label className="block text-xs font-semibold text-gray-600 uppercase tracking-wide mb-1.5">
+              Title
+            </label>
             <input
               required
               value={form.title}
               onChange={(e) => setForm({ ...form, title: e.target.value })}
-              className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
               placeholder="e.g. New Update Available"
+              className={INPUT}
             />
           </div>
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Message</label>
+            <label className="block text-xs font-semibold text-gray-600 uppercase tracking-wide mb-1.5">
+              Message
+            </label>
             <textarea
               required
               rows={4}
               value={form.body}
               onChange={(e) => setForm({ ...form, body: e.target.value })}
-              className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
               placeholder="Notification body…"
+              className={`${INPUT} resize-none`}
             />
           </div>
-          {result && (
-            <div className={`text-sm px-3 py-2 rounded ${result.ok ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-600'}`}>
-              {result.ok ? '✓ ' : '✕ '}{result.message}
-            </div>
-          )}
-          <button
-            type="submit"
-            disabled={loading}
-            className="w-full bg-blue-600 text-white py-2 rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors"
-          >
-            {loading ? 'Sending…' : '📢 Send Broadcast'}
-          </button>
+          <Button type="submit" loading={loading} className="w-full justify-center">
+            📢 Send Broadcast
+          </Button>
         </form>
       </div>
     </div>

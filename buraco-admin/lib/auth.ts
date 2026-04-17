@@ -1,20 +1,18 @@
-'use client';
+import Cookies from 'js-cookie';
+
+const KEY = 'admin_token';
+const EXPIRES = 1 / 3; // 8 hours
 
 export function getToken(): string | null {
-  if (typeof window === 'undefined') return null;
-  return localStorage.getItem('admin_token');
+  return Cookies.get(KEY) ?? null;
 }
 
 export function setToken(token: string) {
-  localStorage.setItem('admin_token', token);
-  // Also set cookie so middleware can read it
-  document.cookie = `admin_token=${token}; path=/; max-age=${8 * 60 * 60}; SameSite=Lax`;
+  Cookies.set(KEY, token, { expires: EXPIRES, path: '/', sameSite: 'lax' });
 }
 
 export function clearToken() {
-  localStorage.removeItem('admin_token');
-  // Clear cookie too
-  document.cookie = 'admin_token=; path=/; max-age=0; SameSite=Lax';
+  Cookies.remove(KEY, { path: '/' });
 }
 
 export function isAuthenticated(): boolean {

@@ -1,8 +1,14 @@
 'use client';
-import { useCallback, useEffect, useState } from 'react';
+import { useState } from 'react';
+import toast from 'react-hot-toast';
 import api from '@/lib/api';
+import { usePaginated } from '@/hooks/useFetch';
+import { useMutation } from '@/hooks/useMutation';
+import Badge from '@/components/ui/Badge';
+import Button from '@/components/ui/Button';
+import Modal from '@/components/ui/Modal';
+import PageHeader from '@/components/ui/PageHeader';
 import Pagination from '@/components/ui/Pagination';
-import Toast from '@/components/ui/Toast';
 
 interface User {
   id: string;
@@ -12,239 +18,196 @@ interface User {
   diamonds: number;
   subscriptionStatus: string;
   isBanned: boolean;
-  createdAt: string;
   lastSeenAt: string | null;
 }
 
+const INPUT = 'w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500';
+
+function planBadge(status: string) {
+  if (status === 'PREMIUM') return <Badge variant="yellow">PREMIUM</Badge>;
+  if (status === 'BASIC')   return <Badge variant="blue">BASIC</Badge>;
+  return <Badge variant="gray">{status}</Badge>;
+}
+
 export default function UsersPage() {
-  const [users, setUsers] = useState<User[]>([]);
-  const [page, setPage] = useState(1);
-  const [totalPages, setTotalPages] = useState(1);
+  const [page, setPage]     = useState(1);
   const [search, setSearch] = useState('');
-  const [loading, setLoading] = useState(true);
-  const [selectedUser, setSelectedUser] = useState<User | null>(null);
-  const [creditAmount, setCreditAmount] = useState('');
-  const [creditCurrency, setCreditCurrency] = useState<'COINS' | 'DIAMONDS'>('COINS');
+  const [query, setQuery]   = useState('');
+
+  const { items: users, totalPages, loading, refetch } = usePaginated<User>(
+    '/admin/users',
+    { page, limit: 20, search: query || undefined },
+  );
+
+  const [selected, setSelected] = useState<User | null>(null);
+  const [amount, setAmount]     = useState('');
+  const [currency, setCurrency] = useState<'COINS' | 'DIAMONDS'>('COINS');
   const [banReason, setBanReason] = useState('');
-  const [mutating, setMutating] = useState(false);
-  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
 
-  const load = useCallback((p: number, q: string) => {
-    setLoading(true);
-    api.get('/admin/users', { params: { page: p, limit: 20, search: q || undefined } })
-      .then((r) => {
-        setUsers(r.data.data.data ?? []);
-        setTotalPages(r.data.data.totalPages ?? 1);
-      })
-      .catch(() => {
-        setUsers([]);
-        setTotalPages(1);
-        setToast({ message: 'Failed to load users.', type: 'error' });
-      })
-      .finally(() => setLoading(false));
-  }, []);
+  const banMutation    = useMutation();
+  const creditMutation = useMutation();
+  const deductMutation = useMutation();
 
-  useEffect(() => { load(page, search); }, [load, page, search]);
-
-  function handleSearch(e: React.FormEvent) {
-    e.preventDefault();
-    setPage(1);
-    load(1, search);
-  }
-
-  function closeModal() {
-    setSelectedUser(null);
-    setCreditAmount('');
+  function openModal(u: User) {
+    setSelected(u);
+    setAmount('');
     setBanReason('');
   }
 
-  async function handleBan(user: User) {
-    if (mutating) return;
-    setMutating(true);
-    try {
-      const reason = user.isBanned ? undefined : (banReason.trim() || 'Banned by admin');
-      await api.patch(`/admin/users/${user.id}/ban`, { isBanned: !user.isBanned, reason });
-      setToast({
-        message: user.isBanned ? `${user.username} unbanned.` : `${user.username} banned.`,
-        type: 'success',
-      });
-      closeModal();
-      load(page, search);
-    } catch {
-      setToast({ message: 'Failed to update ban status.', type: 'error' });
-    } finally {
-      setMutating(false);
-    }
+  async function handleCredit(type: 'credit' | 'deduct') {
+    const n = parseInt(amount);
+    if (!amount || isNaN(n) || n <= 0) { toast.error('Enter a valid positive amount.'); return; }
+    const mut = type === 'credit' ? creditMutation : deductMutation;
+    const ok = await mut.run(() =>
+      api.post(`/admin/users/${selected!.id}/${type}`, { currency, amount: n }),
+    );
+    if (ok) { toast.success(`${type === 'credit' ? 'Credited' : 'Deducted'} ${n.toLocaleString()} ${currency.toLowerCase()}.`); setSelected(null); refetch(); }
+    else toast.error('Currency operation failed.');
   }
 
-  async function handleCredit(userId: string, type: 'credit' | 'deduct') {
-    if (mutating) return;
-    const amount = parseInt(creditAmount);
-    if (!creditAmount || isNaN(amount) || amount <= 0) {
-      setToast({ message: 'Enter a valid positive amount.', type: 'error' });
-      return;
-    }
-    setMutating(true);
-    try {
-      await api.post(`/admin/users/${userId}/${type}`, { currency: creditCurrency, amount });
-      setToast({ message: `${type === 'credit' ? 'Credited' : 'Deducted'} ${amount.toLocaleString()} ${creditCurrency.toLowerCase()}.`, type: 'success' });
-      closeModal();
-      load(page, search);
-    } catch {
-      setToast({ message: `Failed to ${type} currency.`, type: 'error' });
-    } finally {
-      setMutating(false);
-    }
+  async function handleBan() {
+    const ok = await banMutation.run(() =>
+      api.patch(`/admin/users/${selected!.id}/ban`, {
+        isBanned: !selected!.isBanned,
+        reason: !selected!.isBanned ? (banReason.trim() || 'Banned by admin') : undefined,
+      }),
+    );
+    if (ok) {
+      toast.success(selected!.isBanned ? `${selected!.username} unbanned.` : `${selected!.username} banned.`);
+      setSelected(null);
+      refetch();
+    } else toast.error('Ban operation failed.');
   }
-
-  const PLAN_COLORS: Record<string, string> = {
-    PREMIUM: 'bg-yellow-100 text-yellow-700',
-    BASIC: 'bg-blue-100 text-blue-700',
-  };
 
   return (
     <div>
-      <h2 className="text-2xl font-bold text-gray-900 mb-6">User Management</h2>
+      <PageHeader title="Users" subtitle="Search and manage player accounts" />
 
-      <form onSubmit={handleSearch} className="flex gap-3 mb-6">
+      {/* Search */}
+      <form
+        onSubmit={(e) => { e.preventDefault(); setPage(1); setQuery(search); }}
+        className="flex gap-2 mb-6"
+      >
         <input
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           placeholder="Search by username or email…"
-          className="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+          className="flex-1 border border-gray-300 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
         />
-        <button type="submit" className="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-blue-700">
-          Search
-        </button>
+        <Button type="submit">Search</Button>
       </form>
 
-      {loading ? (
-        <div className="text-gray-500">Loading...</div>
-      ) : (
-        <div className="bg-white rounded-xl shadow overflow-hidden">
-          {users.length === 0 ? (
-            <div className="text-gray-400 p-8 text-center">No users found.</div>
-          ) : (
-            <table className="w-full text-sm">
-              <thead className="bg-gray-50 border-b">
-                <tr>
-                  {['Username', 'Email', 'Coins', 'Diamonds', 'Plan', 'Status', 'Last Seen', 'Actions'].map((h) => (
-                    <th key={h} className="text-left px-4 py-3 text-gray-600 font-medium">{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100">
-                {users.map((u) => (
-                  <tr key={u.id} className="hover:bg-gray-50">
-                    <td className="px-4 py-3 font-medium">{u.username}</td>
-                    <td className="px-4 py-3 text-gray-500">{u.email ?? '—'}</td>
-                    <td className="px-4 py-3">{u.coins.toLocaleString()}</td>
-                    <td className="px-4 py-3">{u.diamonds.toLocaleString()}</td>
-                    <td className="px-4 py-3">
-                      <span className={`px-2 py-0.5 rounded text-xs font-medium ${PLAN_COLORS[u.subscriptionStatus] ?? 'bg-gray-100 text-gray-600'}`}>
-                        {u.subscriptionStatus}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3">
-                      <span className={`px-2 py-0.5 rounded text-xs font-medium ${u.isBanned ? 'bg-red-100 text-red-600' : 'bg-green-100 text-green-600'}`}>
-                        {u.isBanned ? 'Banned' : 'Active'}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-gray-500">
-                      {u.lastSeenAt ? new Date(u.lastSeenAt).toLocaleDateString() : '—'}
-                    </td>
-                    <td className="px-4 py-3">
-                      <button onClick={() => setSelectedUser(u)} className="text-blue-600 hover:underline text-xs">
-                        Manage
-                      </button>
-                    </td>
-                  </tr>
+      {/* Table */}
+      <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
+        {loading ? (
+          <div className="p-8 text-center text-gray-400 text-sm">Loading…</div>
+        ) : users.length === 0 ? (
+          <div className="p-8 text-center text-gray-400 text-sm">No users found.</div>
+        ) : (
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-gray-100 bg-gray-50">
+                {['Username', 'Email', 'Coins', 'Diamonds', 'Plan', 'Status', 'Last Seen', ''].map((h) => (
+                  <th key={h} className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">
+                    {h}
+                  </th>
                 ))}
-              </tbody>
-            </table>
-          )}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-50">
+              {users.map((u) => (
+                <tr key={u.id} className="hover:bg-gray-50/50 transition-colors">
+                  <td className="px-4 py-3 font-medium text-gray-900">{u.username}</td>
+                  <td className="px-4 py-3 text-gray-500">{u.email ?? '—'}</td>
+                  <td className="px-4 py-3 text-gray-700">{u.coins.toLocaleString()}</td>
+                  <td className="px-4 py-3 text-gray-700">{u.diamonds.toLocaleString()}</td>
+                  <td className="px-4 py-3">{planBadge(u.subscriptionStatus)}</td>
+                  <td className="px-4 py-3">
+                    <Badge variant={u.isBanned ? 'red' : 'green'}>
+                      {u.isBanned ? 'Banned' : 'Active'}
+                    </Badge>
+                  </td>
+                  <td className="px-4 py-3 text-gray-400 text-xs">
+                    {u.lastSeenAt ? new Date(u.lastSeenAt).toLocaleDateString() : '—'}
+                  </td>
+                  <td className="px-4 py-3">
+                    <button onClick={() => openModal(u)} className="text-blue-600 hover:underline text-xs font-medium">
+                      Manage
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+        {!loading && users.length > 0 && (
           <div className="px-4 pb-4">
             <Pagination page={page} totalPages={totalPages} onChange={setPage} />
           </div>
-        </div>
-      )}
+        )}
+      </div>
 
-      {selectedUser && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-xl shadow-xl p-6 w-full max-w-md">
-            <h3 className="text-lg font-bold mb-1">Manage: {selectedUser.username}</h3>
-            <p className="text-xs text-gray-400 mb-5">{selectedUser.email ?? 'No email'}</p>
-
-            <div className="space-y-5">
-              <section>
-                <p className="text-sm font-semibold text-gray-700 mb-2">Credit / Deduct Currency</p>
-                <div className="flex gap-2 mb-2">
-                  <select
-                    value={creditCurrency}
-                    onChange={(e) => setCreditCurrency(e.target.value as 'COINS' | 'DIAMONDS')}
-                    className="border rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  >
-                    <option value="COINS">Coins</option>
-                    <option value="DIAMONDS">Diamonds</option>
-                  </select>
-                  <input
-                    type="number"
-                    min="1"
-                    value={creditAmount}
-                    onChange={(e) => setCreditAmount(e.target.value)}
-                    placeholder="Amount"
-                    className="border rounded px-2 py-1.5 text-sm flex-1 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  />
-                </div>
-                <div className="flex gap-2">
-                  <button
-                    onClick={() => handleCredit(selectedUser.id, 'credit')}
-                    disabled={mutating}
-                    className="bg-green-600 text-white px-3 py-1.5 rounded text-sm hover:bg-green-700 disabled:opacity-50"
-                  >
-                    {mutating ? '…' : 'Credit'}
-                  </button>
-                  <button
-                    onClick={() => handleCredit(selectedUser.id, 'deduct')}
-                    disabled={mutating}
-                    className="bg-red-500 text-white px-3 py-1.5 rounded text-sm hover:bg-red-600 disabled:opacity-50"
-                  >
-                    {mutating ? '…' : 'Deduct'}
-                  </button>
-                </div>
-              </section>
-
-              <section>
-                <p className="text-sm font-semibold text-gray-700 mb-2">
-                  {selectedUser.isBanned ? 'Unban User' : 'Ban User'}
-                </p>
-                {!selectedUser.isBanned && (
-                  <input
-                    value={banReason}
-                    onChange={(e) => setBanReason(e.target.value)}
-                    placeholder="Ban reason (optional)…"
-                    className="border rounded px-2 py-1.5 text-sm w-full mb-2 focus:outline-none focus:ring-2 focus:ring-red-400"
-                  />
-                )}
-                <button
-                  onClick={() => handleBan(selectedUser)}
-                  disabled={mutating}
-                  className={`px-3 py-1.5 rounded text-sm text-white disabled:opacity-50 ${selectedUser.isBanned ? 'bg-green-600 hover:bg-green-700' : 'bg-red-500 hover:bg-red-600'}`}
+      {/* Manage modal */}
+      {selected && (
+        <Modal title={`Manage: ${selected.username}`} onClose={() => setSelected(null)}>
+          <div className="space-y-6">
+            {/* Currency */}
+            <section>
+              <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">Currency</p>
+              <div className="flex gap-2 mb-3">
+                <select
+                  value={currency}
+                  onChange={(e) => setCurrency(e.target.value as 'COINS' | 'DIAMONDS')}
+                  className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                 >
-                  {mutating ? '…' : selectedUser.isBanned ? 'Unban User' : 'Ban User'}
-                </button>
-              </section>
-            </div>
+                  <option value="COINS">Coins</option>
+                  <option value="DIAMONDS">Diamonds</option>
+                </select>
+                <input
+                  type="number"
+                  min="1"
+                  value={amount}
+                  onChange={(e) => setAmount(e.target.value)}
+                  placeholder="Amount"
+                  className={`flex-1 ${INPUT}`}
+                />
+              </div>
+              <div className="flex gap-2">
+                <Button variant="success" size="sm" loading={creditMutation.loading} onClick={() => handleCredit('credit')}>
+                  Credit
+                </Button>
+                <Button variant="danger" size="sm" loading={deductMutation.loading} onClick={() => handleCredit('deduct')}>
+                  Deduct
+                </Button>
+              </div>
+            </section>
 
-            <button onClick={closeModal} className="mt-5 text-sm text-gray-400 hover:text-gray-600 block">
-              Close
-            </button>
+            <div className="border-t border-gray-100" />
+
+            {/* Ban */}
+            <section>
+              <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">
+                {selected.isBanned ? 'Unban User' : 'Ban User'}
+              </p>
+              {!selected.isBanned && (
+                <input
+                  value={banReason}
+                  onChange={(e) => setBanReason(e.target.value)}
+                  placeholder="Ban reason (optional)…"
+                  className={`${INPUT} mb-3`}
+                />
+              )}
+              <Button
+                variant={selected.isBanned ? 'success' : 'danger'}
+                size="sm"
+                loading={banMutation.loading}
+                onClick={handleBan}
+              >
+                {selected.isBanned ? 'Unban User' : 'Ban User'}
+              </Button>
+            </section>
           </div>
-        </div>
-      )}
-
-      {toast && (
-        <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />
+        </Modal>
       )}
     </div>
   );
