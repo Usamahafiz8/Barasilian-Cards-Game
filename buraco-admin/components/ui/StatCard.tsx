@@ -13,7 +13,9 @@ export default function StatCard({ label, value, icon, color = 'bg-blue-600' }: 
       </div>
       <div>
         <p className="text-gray-500 text-sm">{label}</p>
-        <p className="text-2xl font-bold text-gray-900">{value.toLocaleString()}</p>
+        <p className="text-2xl font-bold text-gray-900">
+          {typeof value === 'number' ? value.toLocaleString() : value}
+        </p>
       </div>
     </div>
   );
