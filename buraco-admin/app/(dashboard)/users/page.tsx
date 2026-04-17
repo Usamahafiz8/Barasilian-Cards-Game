@@ -29,7 +29,8 @@ export default function UsersPage() {
   const load = useCallback((p: number, q: string) => {
     setLoading(true);
     api.get('/admin/users', { params: { page: p, limit: 20, search: q || undefined } })
-      .then((r) => { setUsers(r.data.data.data); setTotalPages(r.data.data.totalPages); })
+      .then((r) => { setUsers(r.data.data.data ?? []); setTotalPages(r.data.data.totalPages ?? 1); })
+      .catch(() => { setUsers([]); setTotalPages(1); })
       .finally(() => setLoading(false));
   }, []);
 

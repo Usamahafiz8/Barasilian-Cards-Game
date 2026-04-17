@@ -22,7 +22,10 @@ export default function ShopPage() {
 
   function loadItems() {
     setLoading(true);
-    api.get('/shop/items', { params: { limit: 100 } }).then((r) => setItems(r.data.data.data ?? r.data.data)).finally(() => setLoading(false));
+    api.get('/admin/shop/items', { params: { limit: 100 } })
+      .then((r) => setItems(r.data.data.data ?? r.data.data ?? []))
+      .catch(() => setItems([]))
+      .finally(() => setLoading(false));
   }
 
   useEffect(() => { loadItems(); }, []);
