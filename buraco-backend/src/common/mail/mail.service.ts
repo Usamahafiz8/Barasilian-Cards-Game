@@ -1,29 +1,43 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as nodemailer from 'nodemailer';
-import { Transporter } from 'nodemailer';
+import { SystemConfigService } from '../system-config/system-config.service';
 
 @Injectable()
 export class MailService {
   private readonly logger = new Logger(MailService.name);
-  private transporter: Transporter;
 
-  constructor(private config: ConfigService) {
-    this.transporter = nodemailer.createTransport({
-      host: this.config.get<string>('smtp.host'),
-      port: this.config.get<number>('smtp.port') ?? 587,
-      secure: (this.config.get<number>('smtp.port') ?? 587) === 465,
-      auth: {
-        user: this.config.get<string>('smtp.user'),
-        pass: this.config.get<string>('smtp.pass'),
-      },
+  constructor(
+    private config: ConfigService,
+    private sysConfig: SystemConfigService,
+  ) {}
+
+  private async getTransporter() {
+    const [host, portStr, user, pass] = await Promise.all([
+      this.sysConfig.get('smtp_host', this.config.get<string>('smtp.host') ?? 'smtp.gmail.com'),
+      this.sysConfig.get('smtp_port', String(this.config.get<number>('smtp.port') ?? 587)),
+      this.sysConfig.get('smtp_user', this.config.get<string>('smtp.user') ?? ''),
+      this.sysConfig.get('smtp_pass', this.config.get<string>('smtp.pass') ?? ''),
+    ]);
+    const port = parseInt(portStr, 10) || 587;
+    return nodemailer.createTransport({
+      host,
+      port,
+      secure: port === 465,
+      auth: { user, pass },
     });
+  }
+
+  private async getFromAddress() {
+    const from = await this.sysConfig.get('smtp_from', this.config.get<string>('smtp.from') ?? 'noreply@buraco.game');
+    return `"Buraco Game" <${from}>`;
   }
 
   async sendPasswordReset(email: string, otp: string): Promise<void> {
     try {
-      await this.transporter.sendMail({
-        from: `"Buraco Game" <${this.config.get<string>('smtp.user')}>`,
+      const transporter = await this.getTransporter();
+      await transporter.sendMail({
+        from: await this.getFromAddress(),
         to: email,
         subject: 'Password Reset Code',
         html: `
@@ -45,8 +59,9 @@ export class MailService {
 
   async sendWelcome(email: string, username: string): Promise<void> {
     try {
-      await this.transporter.sendMail({
-        from: `"Buraco Game" <${this.config.get<string>('smtp.user')}>`,
+      const transporter = await this.getTransporter();
+      await transporter.sendMail({
+        from: await this.getFromAddress(),
         to: email,
         subject: 'Welcome to Buraco!',
         html: `

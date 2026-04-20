@@ -27,15 +27,45 @@ async function main() {
 
   // ─── System Config ────────────────────────────────────────────────────────
   const configs = [
-    { key: 'maintenance_mode', value: 'false' },
-    { key: 'min_version_ios', value: '1.0.0' },
-    { key: 'min_version_android', value: '1.0.0' },
-    { key: 'classic_entry_fee', value: '100' },
-    { key: 'professional_entry_fee', value: '500' },
-    { key: 'daily_login_reward_coins', value: '200' },
-    { key: 'max_club_members', value: '50' },
-    { key: 'turn_duration_seconds', value: '30' },
-    { key: 'disconnect_timeout_seconds', value: '60' },
+    // App
+    { key: 'maintenance_mode',          value: 'false' },
+    { key: 'min_version_ios',           value: '1.0.0' },
+    { key: 'min_version_android',       value: '1.0.0' },
+    // Game
+    { key: 'turn_duration_seconds',     value: '30' },
+    { key: 'disconnect_timeout_seconds',value: '60' },
+    // Economy — new user defaults
+    { key: 'new_user_coins',            value: '1000' },
+    { key: 'new_user_diamonds',         value: '0' },
+    { key: 'new_user_lives',            value: '5' },
+    { key: 'daily_login_reward_coins',  value: '200' },
+    // Matchmaking
+    { key: 'classic_entry_fee',         value: '100' },
+    { key: 'professional_entry_fee',    value: '500' },
+    // Clubs
+    { key: 'max_club_members',          value: '50' },
+    // Rate limiting
+    { key: 'throttle_ttl_seconds',      value: '60' },
+    { key: 'throttle_limit',            value: '100' },
+    // Integrations — Google OAuth
+    { key: 'google_client_id',          value: '' },
+    { key: 'google_client_secret',      value: '' },
+    // Integrations — Apple Sign-In
+    { key: 'apple_client_id',           value: '' },
+    { key: 'apple_team_id',             value: '' },
+    { key: 'apple_key_id',              value: '' },
+    { key: 'apple_private_key',         value: '' },
+    // Integrations — AWS S3
+    { key: 'aws_region',                value: '' },
+    { key: 'aws_access_key_id',         value: '' },
+    { key: 'aws_secret_access_key',     value: '' },
+    { key: 'aws_s3_bucket',             value: '' },
+    // Integrations — SMTP
+    { key: 'smtp_host',                 value: '' },
+    { key: 'smtp_port',                 value: '' },
+    { key: 'smtp_user',                 value: '' },
+    { key: 'smtp_pass',                 value: '' },
+    { key: 'smtp_from',                 value: '' },
   ];
 
   for (const cfg of configs) {

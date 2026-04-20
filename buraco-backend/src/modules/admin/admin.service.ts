@@ -8,8 +8,9 @@ import {
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import * as bcrypt from 'bcryptjs';
-import { CurrencyType, NotificationType, TransactionType } from '@prisma/client';
+import { CurrencyType, NotificationType, SubscriptionStatus, TransactionType } from '@prisma/client';
 import { PrismaService } from '../../common/prisma/prisma.service';
+import { SystemConfigService } from '../../common/system-config/system-config.service';
 import { AdminLoginDto } from './dto/admin-login.dto';
 import { BanUserDto } from './dto/ban-user.dto';
 import { CreditUserDto } from './dto/credit-user.dto';
@@ -17,6 +18,7 @@ import { BroadcastDto } from './dto/broadcast.dto';
 import { CreatePromoDto } from './dto/create-promo.dto';
 import { SystemConfigDto } from './dto/system-config.dto';
 import { CreateShopItemDto } from './dto/create-shop-item.dto';
+import { EditUserDto } from './dto/edit-user.dto';
 
 @Injectable()
 export class AdminService {
@@ -24,6 +26,7 @@ export class AdminService {
     private prisma: PrismaService,
     private jwt: JwtService,
     private config: ConfigService,
+    private sysConfig: SystemConfigService,
   ) {}
 
   // ─── Auth ─────────────────────────────────────────────────────────────────
@@ -49,16 +52,44 @@ export class AdminService {
   // ─── Dashboard Stats ──────────────────────────────────────────────────────
 
   async getDashboard() {
-    const [totalUsers, activeUsers, bannedUsers, totalGames, activeGames, totalRevenue] = await Promise.all([
+    const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
+
+    const [totalUsers, activeUsers, bannedUsers, totalGames, activeGames, totalRevenue, newUsersToday, gamesToday, topPlayerStats] = await Promise.all([
       this.prisma.user.count({ where: { isDeleted: false } }),
-      this.prisma.user.count({ where: { isDeleted: false, lastSeenAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } } }),
+      this.prisma.user.count({ where: { isDeleted: false, lastSeenAt: { gte: since24h } } }),
       this.prisma.user.count({ where: { isBanned: true } }),
       this.prisma.gameSession.count(),
       this.prisma.gameSession.count({ where: { status: 'IN_PROGRESS' } }),
       this.prisma.transaction.aggregate({ _sum: { amount: true }, where: { type: TransactionType.PURCHASE } }),
+      this.prisma.user.count({ where: { isDeleted: false, createdAt: { gte: since24h } } }),
+      this.prisma.gameSession.count({ where: { createdAt: { gte: since24h } } }),
+      this.prisma.playerStats.findMany({
+        take: 5,
+        orderBy: { points: 'desc' },
+        include: { user: { select: { id: true, username: true, avatarUrl: true } } },
+      }),
     ]);
 
-    return { totalUsers, activeUsers, bannedUsers, totalGames, activeGames, totalRevenue: totalRevenue._sum.amount ?? 0 };
+    const topPlayers = topPlayerStats.map((s) => ({
+      id: s.user.id,
+      username: s.user.username,
+      avatarUrl: s.user.avatarUrl,
+      points: s.points,
+      level: s.level,
+      winPercentage: s.winPercentage,
+    }));
+
+    return {
+      totalUsers,
+      activeUsers,
+      bannedUsers,
+      totalGames,
+      activeGames,
+      totalRevenue: totalRevenue._sum.amount ?? 0,
+      newUsersToday,
+      gamesToday,
+      topPlayers,
+    };
   }
 
   // ─── User Management ─────────────────────────────────────────────────────
@@ -258,8 +289,58 @@ export class AdminService {
       update: { value: dto.value, updatedBy: adminId },
       create: { key, value: dto.value, updatedBy: adminId },
     });
+    this.sysConfig.invalidate(key);
     await this.audit(adminId, 'UPDATE_CONFIG', 'SystemConfig', key, { value: dto.value });
     return cfg;
+  }
+
+  // ─── Clubs ────────────────────────────────────────────────────────────────
+
+  async listClubs(page: number, limit: number, search?: string) {
+    const where = search
+      ? { name: { contains: search, mode: 'insensitive' as const } }
+      : {};
+    const [data, total] = await Promise.all([
+      this.prisma.club.findMany({
+        where,
+        skip: (page - 1) * limit,
+        take: limit,
+        orderBy: { createdAt: 'desc' },
+      }),
+      this.prisma.club.count({ where }),
+    ]);
+    return { data, total, page, limit, totalPages: Math.ceil(total / limit) };
+  }
+
+  async getClub(clubId: string) {
+    const club = await this.prisma.club.findUnique({
+      where: { id: clubId },
+      include: {
+        members: {
+          include: { user: { select: { username: true, email: true } } },
+          orderBy: { joinedAt: 'asc' },
+        },
+      },
+    });
+    if (!club) throw new NotFoundException('Club not found');
+    return club;
+  }
+
+  async deleteClub(adminId: string, clubId: string) {
+    const club = await this.prisma.club.findUnique({ where: { id: clubId } });
+    if (!club) throw new NotFoundException('Club not found');
+    await this.prisma.club.delete({ where: { id: clubId } });
+    await this.audit(adminId, 'DELETE_CLUB', 'Club', clubId, { name: club.name });
+    return { message: `Club "${club.name}" deleted` };
+  }
+
+  async removeClubMember(adminId: string, clubId: string, userId: string) {
+    const member = await this.prisma.clubMember.findUnique({ where: { clubId_userId: { clubId, userId } } });
+    if (!member) throw new NotFoundException('Member not found');
+    await this.prisma.clubMember.delete({ where: { clubId_userId: { clubId, userId } } });
+    await this.prisma.club.update({ where: { id: clubId }, data: { memberCount: { decrement: 1 } } });
+    await this.audit(adminId, 'REMOVE_CLUB_MEMBER', 'ClubMember', userId, { clubId });
+    return { message: 'Member removed' };
   }
 
   // ─── Missions ─────────────────────────────────────────────────────────────
@@ -274,6 +355,134 @@ export class AdminService {
     const updated = await this.prisma.mission.update({ where: { id: missionId }, data: { isActive } });
     await this.audit(adminId, isActive ? 'ACTIVATE_MISSION' : 'DEACTIVATE_MISSION', 'Mission', missionId, {});
     return updated;
+  }
+
+  // ─── Edit User ────────────────────────────────────────────────────────────
+
+  async editUser(adminId: string, userId: string, dto: EditUserDto) {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw new NotFoundException('User not found');
+
+    if (dto.username && dto.username !== user.username) {
+      const taken = await this.prisma.user.findUnique({ where: { username: dto.username } });
+      if (taken) throw new ConflictException('USERNAME_TAKEN');
+    }
+    if (dto.email && dto.email !== user.email) {
+      const taken = await this.prisma.user.findUnique({ where: { email: dto.email } });
+      if (taken) throw new ConflictException('EMAIL_TAKEN');
+    }
+
+    const updated = await this.prisma.user.update({
+      where: { id: userId },
+      data: {
+        ...(dto.username !== undefined && { username: dto.username }),
+        ...(dto.email !== undefined && { email: dto.email }),
+        ...(dto.lives !== undefined && { lives: dto.lives }),
+        ...(dto.subscriptionStatus !== undefined && { subscriptionStatus: dto.subscriptionStatus }),
+        ...(dto.coins !== undefined && { coins: dto.coins }),
+        ...(dto.diamonds !== undefined && { diamonds: dto.diamonds }),
+      },
+    });
+    await this.audit(adminId, 'EDIT_USER', 'User', userId, dto);
+    const { passwordHash, googleId, appleId, ...safe } = updated;
+    return safe;
+  }
+
+  // ─── Send Item to User ────────────────────────────────────────────────────
+
+  async sendItemToUser(adminId: string, userId: string, itemId: string) {
+    const [user, item] = await Promise.all([
+      this.prisma.user.findUnique({ where: { id: userId } }),
+      this.prisma.shopItem.findUnique({ where: { id: itemId } }),
+    ]);
+    if (!user) throw new NotFoundException('User not found');
+    if (!item) throw new NotFoundException('Shop item not found');
+
+    await this.prisma.$transaction([
+      this.prisma.inventory.upsert({
+        where: { userId_itemId: { userId, itemId } },
+        update: { quantity: { increment: 1 } },
+        create: { userId, itemId, quantity: 1 },
+      }),
+      this.prisma.transaction.create({
+        data: {
+          userId,
+          type: TransactionType.MANUAL_CREDIT,
+          currency: CurrencyType.COINS,
+          amount: 0,
+          balanceBefore: user.coins,
+          balanceAfter: user.coins,
+          description: `Admin gift: ${item.name}`,
+          referenceId: itemId,
+          performedBy: adminId,
+        },
+      }),
+    ]);
+
+    await this.audit(adminId, 'SEND_ITEM', 'UserInventory', userId, { itemId, itemName: item.name });
+    return { message: `Item "${item.name}" sent to ${user.username}` };
+  }
+
+  // ─── Leaderboard ──────────────────────────────────────────────────────────
+
+  async getLeaderboard(page: number, limit: number, sort: 'points' | 'winPercentage' | 'gamesPlayed' | 'level' = 'points') {
+    const validSorts = ['points', 'winPercentage', 'gamesPlayed', 'level'];
+    const orderField = validSorts.includes(sort) ? sort : 'points';
+
+    const [data, total] = await Promise.all([
+      this.prisma.playerStats.findMany({
+        skip: (page - 1) * limit,
+        take: limit,
+        orderBy: { [orderField]: 'desc' },
+        include: { user: { select: { id: true, username: true, email: true, avatarUrl: true, isBanned: true } } },
+      }),
+      this.prisma.playerStats.count(),
+    ]);
+
+    return {
+      data: data.map((s, i) => ({
+        rank: (page - 1) * limit + i + 1,
+        userId: s.userId,
+        username: s.user.username,
+        email: s.user.email,
+        avatarUrl: s.user.avatarUrl,
+        isBanned: s.user.isBanned,
+        level: s.level,
+        points: s.points,
+        gamesPlayed: s.gamesPlayed,
+        winPercentage: s.winPercentage,
+        winStreak: s.winStreak,
+        bestStreak: s.bestWinStreak,
+      })),
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
+    };
+  }
+
+  async resetPlayerStats(adminId: string, userId: string) {
+    const stats = await this.prisma.playerStats.findUnique({ where: { userId } });
+    if (!stats) throw new NotFoundException('Player stats not found');
+
+    await this.prisma.playerStats.update({
+      where: { userId },
+      data: { points: 0, level: 1, gamesPlayed: 0, winPercentage: 0, winStreak: 0, bestWinStreak: 0 },
+    });
+    await this.audit(adminId, 'RESET_PLAYER_STATS', 'PlayerStats', userId, {});
+    return { message: 'Player stats reset' };
+  }
+
+  async setPlayerScore(adminId: string, userId: string, points: number, level?: number) {
+    const stats = await this.prisma.playerStats.findUnique({ where: { userId } });
+    if (!stats) throw new NotFoundException('Player stats not found');
+
+    await this.prisma.playerStats.update({
+      where: { userId },
+      data: { points, ...(level !== undefined && { level }) },
+    });
+    await this.audit(adminId, 'SET_PLAYER_SCORE', 'PlayerStats', userId, { points, level });
+    return { message: 'Score updated' };
   }
 
   // ─── Audit Logs ───────────────────────────────────────────────────────────

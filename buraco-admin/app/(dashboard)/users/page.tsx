@@ -1,5 +1,6 @@
 'use client';
 import { useState } from 'react';
+import Link from 'next/link';
 import { Search } from 'lucide-react';
 import toast from 'react-hot-toast';
 import api from '@/lib/api';
@@ -133,9 +134,9 @@ export default function UsersPage() {
                       {u.lastSeenAt ? new Date(u.lastSeenAt).toLocaleDateString() : '—'}
                     </td>
                     <td className="px-4 py-3">
-                      <button onClick={() => openModal(u)} className="text-blue-600 hover:underline text-xs font-medium">
+                      <Link href={`/users/${u.id}`} className="text-blue-600 hover:underline text-xs font-medium">
                         Manage
-                      </button>
+                      </Link>
                     </td>
                   </tr>
                 ))}

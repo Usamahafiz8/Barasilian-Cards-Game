@@ -1,7 +1,7 @@
 import {
-  Body, Controller, Delete, Get, Param, Patch, Post, Put, Query, UseGuards,
+  Body, Controller, Delete, Get, Param, Patch, Post, Put, Query, UseGuards, HttpCode,
 } from '@nestjs/common';
-import { ApiBearerAuth, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
+import { ApiBearerAuth, ApiOperation, ApiParam, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { AdminRole } from '@prisma/client';
 import { Public } from '../../common/decorators/public.decorator';
 import { AdminJwtGuard } from '../../common/guards/admin-jwt.guard';
@@ -16,9 +16,11 @@ import { BroadcastDto } from './dto/broadcast.dto';
 import { CreatePromoDto } from './dto/create-promo.dto';
 import { SystemConfigDto } from './dto/system-config.dto';
 import { CreateShopItemDto } from './dto/create-shop-item.dto';
+import { EditUserDto } from './dto/edit-user.dto';
 
 @ApiTags('Admin')
 @Controller('admin')
+@Public()
 export class AdminController {
   constructor(private readonly adminService: AdminService) {}
 
@@ -99,6 +101,25 @@ export class AdminController {
   @ApiOperation({ summary: 'Deduct coins or diamonds from user' })
   deductUser(@CurrentUser('id') adminId: string, @Param('userId') userId: string, @Body() dto: CreditUserDto) {
     return this.adminService.deductUser(adminId, userId, dto);
+  }
+
+  @Patch('users/:userId')
+  @UseGuards(AdminJwtGuard, AdminRolesGuard)
+  @AdminRoles(AdminRole.SUPER_ADMIN)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Edit user profile fields (username, email, lives, coins, diamonds, subscriptionStatus)' })
+  editUser(@CurrentUser('id') adminId: string, @Param('userId') userId: string, @Body() dto: EditUserDto) {
+    return this.adminService.editUser(adminId, userId, dto);
+  }
+
+  @Post('users/:userId/send-item')
+  @UseGuards(AdminJwtGuard, AdminRolesGuard)
+  @AdminRoles(AdminRole.SUPER_ADMIN)
+  @HttpCode(200)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Send a shop item directly to a user inventory' })
+  sendItemToUser(@CurrentUser('id') adminId: string, @Param('userId') userId: string, @Body('itemId') itemId: string) {
+    return this.adminService.sendItemToUser(adminId, userId, itemId);
   }
 
   // ─── Games ────────────────────────────────────────────────────────────────
@@ -207,6 +228,101 @@ export class AdminController {
   @ApiOperation({ summary: 'Set a system config value' })
   setConfig(@CurrentUser('id') adminId: string, @Param('key') key: string, @Body() dto: SystemConfigDto) {
     return this.adminService.setConfig(adminId, key, dto);
+  }
+
+  // ─── Clubs ────────────────────────────────────────────────────────────────
+
+  @Get('clubs')
+  @UseGuards(AdminJwtGuard)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'List all clubs with pagination and search' })
+  @ApiQuery({ name: 'page',   required: false, type: Number })
+  @ApiQuery({ name: 'limit',  required: false, type: Number })
+  @ApiQuery({ name: 'search', required: false, type: String })
+  @ApiResponse({ status: 200, description: 'Paginated club list' })
+  listClubs(@Query('page') page = 1, @Query('limit') limit = 20, @Query('search') search?: string) {
+    return this.adminService.listClubs(+page, +limit, search);
+  }
+
+  @Get('clubs/:clubId')
+  @UseGuards(AdminJwtGuard)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Get club detail with all members' })
+  @ApiParam({ name: 'clubId', description: 'Club UUID' })
+  @ApiResponse({ status: 200, description: 'Club with members' })
+  @ApiResponse({ status: 404, description: 'Club not found' })
+  getClub(@Param('clubId') clubId: string) {
+    return this.adminService.getClub(clubId);
+  }
+
+  @Delete('clubs/:clubId')
+  @UseGuards(AdminJwtGuard, AdminRolesGuard)
+  @AdminRoles(AdminRole.SUPER_ADMIN, AdminRole.MODERATOR)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Delete a club permanently' })
+  @ApiParam({ name: 'clubId', description: 'Club UUID' })
+  @ApiResponse({ status: 200, description: 'Club deleted' })
+  @ApiResponse({ status: 404, description: 'Club not found' })
+  deleteClub(@CurrentUser('id') adminId: string, @Param('clubId') clubId: string) {
+    return this.adminService.deleteClub(adminId, clubId);
+  }
+
+  @Delete('clubs/:clubId/members/:userId')
+  @UseGuards(AdminJwtGuard, AdminRolesGuard)
+  @AdminRoles(AdminRole.SUPER_ADMIN, AdminRole.MODERATOR)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Remove a member from a club' })
+  @ApiParam({ name: 'clubId', description: 'Club UUID' })
+  @ApiParam({ name: 'userId', description: 'Member player UUID' })
+  @ApiResponse({ status: 200, description: 'Member removed' })
+  @ApiResponse({ status: 404, description: 'Member not found' })
+  removeClubMember(
+    @CurrentUser('id') adminId: string,
+    @Param('clubId') clubId: string,
+    @Param('userId') userId: string,
+  ) {
+    return this.adminService.removeClubMember(adminId, clubId, userId);
+  }
+
+  // ─── Leaderboard ──────────────────────────────────────────────────────────
+
+  @Get('leaderboard')
+  @UseGuards(AdminJwtGuard)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Get full leaderboard with all player stats' })
+  @ApiQuery({ name: 'page',  required: false, type: Number })
+  @ApiQuery({ name: 'limit', required: false, type: Number })
+  @ApiQuery({ name: 'sort',  required: false, enum: ['points', 'winPercentage', 'gamesPlayed', 'level'] })
+  getLeaderboard(
+    @Query('page')  page  = 1,
+    @Query('limit') limit = 20,
+    @Query('sort')  sort  = 'points',
+  ) {
+    return this.adminService.getLeaderboard(+page, +limit, sort as any);
+  }
+
+  @Post('leaderboard/:userId/reset')
+  @UseGuards(AdminJwtGuard, AdminRolesGuard)
+  @AdminRoles(AdminRole.SUPER_ADMIN, AdminRole.MODERATOR)
+  @HttpCode(200)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Reset a player\'s stats to zero' })
+  resetPlayerStats(@CurrentUser('id') adminId: string, @Param('userId') userId: string) {
+    return this.adminService.resetPlayerStats(adminId, userId);
+  }
+
+  @Patch('leaderboard/:userId/score')
+  @UseGuards(AdminJwtGuard, AdminRolesGuard)
+  @AdminRoles(AdminRole.SUPER_ADMIN)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Manually set a player\'s points and/or level' })
+  setPlayerScore(
+    @CurrentUser('id') adminId: string,
+    @Param('userId') userId: string,
+    @Body('points') points: number,
+    @Body('level')  level?: number,
+  ) {
+    return this.adminService.setPlayerScore(adminId, userId, points, level);
   }
 
   // ─── Missions ─────────────────────────────────────────────────────────────

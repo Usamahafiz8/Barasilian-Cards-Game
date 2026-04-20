@@ -4,15 +4,19 @@ import { usePathname, useRouter } from 'next/navigation';
 import {
   LayoutDashboard, Users, Gamepad2, ShoppingBag,
   Tag, Megaphone, Settings2, ScrollText, LogOut,
+  Trophy, Shield, BarChart2,
 } from 'lucide-react';
 import { clearToken } from '@/lib/auth';
 
 const NAV = [
-  { href: '/',          label: 'Dashboard',  Icon: LayoutDashboard },
-  { href: '/users',     label: 'Users',      Icon: Users },
+  { href: '/',             label: 'Dashboard',  Icon: LayoutDashboard },
+  { href: '/leaderboard',  label: 'Leaderboard', Icon: BarChart2 },
+  { href: '/users',        label: 'Users',      Icon: Users },
   { href: '/games',     label: 'Games',      Icon: Gamepad2 },
   { href: '/shop',      label: 'Shop',       Icon: ShoppingBag },
   { href: '/promos',    label: 'Promos',     Icon: Tag },
+  { href: '/missions',  label: 'Missions',   Icon: Trophy },
+  { href: '/clubs',     label: 'Clubs',      Icon: Shield },
   { href: '/broadcast', label: 'Broadcast',  Icon: Megaphone },
   { href: '/config',    label: 'Config',     Icon: Settings2 },
   { href: '/audit',     label: 'Audit Logs', Icon: ScrollText },

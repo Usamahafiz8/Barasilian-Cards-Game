@@ -5,20 +5,28 @@ export function useFetch<T>(url: string, params?: Record<string, unknown>) {
   const [data,    setData]    = useState<T | null>(null);
   const [loading, setLoading] = useState(true);
   const [error,   setError]   = useState(false);
-  // stringify params so the effect re-runs when values change
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  const key = JSON.stringify(params ?? {});
+  const [tick,    setTick]    = useState(0);
 
-  const refetch = useCallback(() => {
+  const paramsStr = JSON.stringify(params ?? {});
+
+  useEffect(() => {
+    let cancelled = false;
     setLoading(true);
     setError(false);
-    api.get(url, params ? { params } : undefined)
-      .then((r) => { setData(r.data.data); setLoading(false); })
-      .catch(() => { setError(true); setLoading(false); });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const parsed = params ? JSON.parse(paramsStr) : undefined;
+    api.get(url, parsed ? { params: parsed } : undefined)
+      .then((r) => {
+        if (!cancelled) { setData(r.data.data); setLoading(false); }
+      })
+      .catch(() => {
+        if (!cancelled) { setError(true); setLoading(false); }
+      });
+    return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [url, key]);
+  }, [url, paramsStr, tick]);
 
-  useEffect(() => { refetch(); }, [refetch]);
+  const refetch = useCallback(() => setTick((t) => t + 1), []);
 
   return { data, loading, error, refetch };
 }

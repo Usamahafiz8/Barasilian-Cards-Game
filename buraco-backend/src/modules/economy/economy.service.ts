@@ -1,10 +1,33 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { CurrencyType, TransactionType } from '@prisma/client';
 import { PrismaService } from '../../common/prisma/prisma.service';
+import { RedisService } from '../../common/redis/redis.service';
+import { SystemConfigService } from '../../common/system-config/system-config.service';
 
 @Injectable()
 export class EconomyService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private redis: RedisService,
+    private sysConfig: SystemConfigService,
+  ) {}
+
+  async claimDailyReward(userId: string) {
+    const key = `daily:${userId}`;
+    const already = await this.redis.get(key);
+    if (already) return { claimed: false, message: 'Already claimed today' };
+
+    const rewardCoins = await this.sysConfig.getNumber('daily_login_reward_coins', 200);
+    await this.addCoins(userId, rewardCoins, TransactionType.REWARD, undefined, 'Daily login reward');
+
+    const now = new Date();
+    const midnight = new Date(now);
+    midnight.setUTCHours(24, 0, 0, 0);
+    const ttl = Math.floor((midnight.getTime() - now.getTime()) / 1000);
+    await this.redis.set(key, '1', ttl);
+
+    return { claimed: true, coinsAwarded: rewardCoins };
+  }
 
   async getBalance(userId: string) {
     const user = await this.prisma.user.findUnique({

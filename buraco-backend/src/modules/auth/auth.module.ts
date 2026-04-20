@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
+import { SystemConfigModule } from '../../common/system-config/system-config.module';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { JwtStrategy } from './strategies/jwt.strategy';
@@ -10,6 +11,7 @@ import { AdminJwtStrategy } from './strategies/admin-jwt.strategy';
   imports: [
     PassportModule,
     JwtModule.register({}),
+    SystemConfigModule,
   ],
   controllers: [AuthController],
   providers: [AuthService, JwtStrategy, AdminJwtStrategy],

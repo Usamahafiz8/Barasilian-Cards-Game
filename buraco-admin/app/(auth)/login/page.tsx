@@ -1,6 +1,5 @@
 'use client';
 import { useState } from 'react';
-import { useRouter } from 'next/navigation';
 import toast from 'react-hot-toast';
 import { Eye, EyeOff } from 'lucide-react';
 import api from '@/lib/api';
@@ -8,7 +7,6 @@ import { setToken } from '@/lib/auth';
 import Button from '@/components/ui/Button';
 
 export default function LoginPage() {
-  const router = useRouter();
   const [email,    setEmail]    = useState('');
   const [password, setPassword] = useState('');
   const [show,     setShow]     = useState(false);

@@ -2,6 +2,7 @@ import { BadRequestException, ConflictException, Injectable, NotFoundException }
 import { ConfigService } from '@nestjs/config';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import { PrismaService } from '../../common/prisma/prisma.service';
+import { SystemConfigService } from '../../common/system-config/system-config.service';
 import { v4 as uuidv4 } from 'uuid';
 
 const PREDEFINED_AVATARS = [
@@ -14,19 +15,19 @@ const PREDEFINED_AVATARS = [
 
 @Injectable()
 export class ProfileService {
-  private s3: S3Client;
-
   constructor(
     private prisma: PrismaService,
     private config: ConfigService,
-  ) {
-    this.s3 = new S3Client({
-      region: config.get<string>('aws.region') ?? 'us-east-1',
-      credentials: {
-        accessKeyId: config.get<string>('aws.accessKeyId') ?? '',
-        secretAccessKey: config.get<string>('aws.secretAccessKey') ?? '',
-      },
-    });
+    private sysConfig: SystemConfigService,
+  ) {}
+
+  private async getS3Client() {
+    const [region, accessKeyId, secretAccessKey] = await Promise.all([
+      this.sysConfig.get('aws_region', this.config.get<string>('aws.region') ?? 'us-east-1'),
+      this.sysConfig.get('aws_access_key_id', this.config.get<string>('aws.accessKeyId') ?? ''),
+      this.sysConfig.get('aws_secret_access_key', this.config.get<string>('aws.secretAccessKey') ?? ''),
+    ]);
+    return new S3Client({ region, credentials: { accessKeyId, secretAccessKey } });
   }
 
   async getProfile(userId: string) {
@@ -76,16 +77,20 @@ export class ProfileService {
 
     const ext = file.originalname.split('.').pop();
     const key = `avatars/${userId}/${uuidv4()}.${ext}`;
-    const bucket = this.config.get<string>('aws.s3Bucket');
+    const [s3, bucket, region] = await Promise.all([
+      this.getS3Client(),
+      this.sysConfig.get('aws_s3_bucket', this.config.get<string>('aws.s3Bucket') ?? ''),
+      this.sysConfig.get('aws_region', this.config.get<string>('aws.region') ?? 'us-east-1'),
+    ]);
 
-    await this.s3.send(new PutObjectCommand({
+    await s3.send(new PutObjectCommand({
       Bucket: bucket,
       Key: key,
       Body: file.buffer,
       ContentType: file.mimetype,
     }));
 
-    const avatarUrl = `https://${bucket}.s3.${this.config.get('aws.region')}.amazonaws.com/${key}`;
+    const avatarUrl = `https://${bucket}.s3.${region}.amazonaws.com/${key}`;
     await this.prisma.user.update({ where: { id: userId }, data: { avatarUrl } });
     return { avatarUrl };
   }

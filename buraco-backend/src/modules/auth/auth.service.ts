@@ -9,10 +9,12 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcryptjs';
+import { createHash } from 'crypto';
 import { OAuth2Client } from 'google-auth-library';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { RedisService } from '../../common/redis/redis.service';
 import { MailService } from '../../common/mail/mail.service';
+import { SystemConfigService } from '../../common/system-config/system-config.service';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
@@ -30,8 +32,9 @@ export class AuthService {
     private jwt: JwtService,
     private config: ConfigService,
     private mail: MailService,
+    private sysConfig: SystemConfigService,
   ) {
-    this.googleClient = new OAuth2Client(config.get('google.clientId'));
+    this.googleClient = new OAuth2Client();
   }
 
   async register(dto: RegisterDto) {
@@ -44,9 +47,11 @@ export class AuthService {
     if (existingUsername) throw new ConflictException('USERNAME_TAKEN');
 
     const passwordHash = await bcrypt.hash(dto.password, 12);
-    const newUserCoins = this.config.get<number>('game.newUserCoins');
-    const newUserDiamonds = this.config.get<number>('game.newUserDiamonds');
-    const newUserLives = this.config.get<number>('game.newUserLives');
+    const [coins, diamonds, lives] = await Promise.all([
+      this.sysConfig.getNumber('new_user_coins', 1000),
+      this.sysConfig.getNumber('new_user_diamonds', 0),
+      this.sysConfig.getNumber('new_user_lives', 5),
+    ]);
 
     const user = await this.prisma.$transaction(async (tx) => {
       const created = await tx.user.create({
@@ -54,9 +59,9 @@ export class AuthService {
           email: dto.email,
           passwordHash,
           username: dto.username,
-          coins: newUserCoins,
-          diamonds: newUserDiamonds,
-          lives: newUserLives,
+          coins,
+          diamonds,
+          lives,
         },
       });
       await tx.playerStats.create({ data: { userId: created.id } });
@@ -83,9 +88,10 @@ export class AuthService {
   }
 
   async loginWithGoogle(dto: GoogleAuthDto) {
+    const googleClientId = await this.sysConfig.get('google_client_id', this.config.get<string>('google.clientId') ?? '');
     const ticket = await this.googleClient.verifyIdToken({
       idToken: dto.idToken,
-      audience: this.config.get('google.clientId'),
+      audience: googleClientId,
     });
     const payload = ticket.getPayload();
     if (!payload) throw new UnauthorizedException('Invalid Google token');
@@ -96,6 +102,11 @@ export class AuthService {
 
     if (!user) {
       const username = await this.generateUsername(name || (email ?? '').split('@')[0]);
+      const [coins, diamonds, lives] = await Promise.all([
+        this.sysConfig.getNumber('new_user_coins', 1000),
+        this.sysConfig.getNumber('new_user_diamonds', 0),
+        this.sysConfig.getNumber('new_user_lives', 5),
+      ]);
       user = await this.prisma.$transaction(async (tx) => {
         const created = await tx.user.create({
           data: {
@@ -103,9 +114,9 @@ export class AuthService {
             email,
             username,
             avatarUrl: picture,
-            coins: this.config.get<number>('game.newUserCoins'),
-            diamonds: this.config.get<number>('game.newUserDiamonds'),
-            lives: this.config.get<number>('game.newUserLives'),
+            coins,
+            diamonds,
+            lives,
           },
         });
         await tx.playerStats.create({ data: { userId: created.id } });
@@ -138,6 +149,11 @@ export class AuthService {
       const lastName = dto.fullName?.lastName || '';
       const baseName = `${firstName}${lastName}`.trim() || (email ? email.split('@')[0] : 'Player');
       const username = await this.generateUsername(baseName);
+      const [coins, diamonds, lives] = await Promise.all([
+        this.sysConfig.getNumber('new_user_coins', 1000),
+        this.sysConfig.getNumber('new_user_diamonds', 0),
+        this.sysConfig.getNumber('new_user_lives', 5),
+      ]);
 
       user = await this.prisma.$transaction(async (tx) => {
         const created = await tx.user.create({
@@ -145,9 +161,9 @@ export class AuthService {
             appleId,
             email: email || null,
             username,
-            coins: this.config.get<number>('game.newUserCoins'),
-            diamonds: this.config.get<number>('game.newUserDiamonds'),
-            lives: this.config.get<number>('game.newUserLives'),
+            coins,
+            diamonds,
+            lives,
           },
         });
         await tx.playerStats.create({ data: { userId: created.id } });
@@ -171,7 +187,7 @@ export class AuthService {
       throw new UnauthorizedException('INVALID_REFRESH_TOKEN');
     }
 
-    const hash = await this.hashToken(token);
+    const hash = this.hashToken(token);
     const stored = await this.prisma.refreshToken.findUnique({ where: { tokenHash: hash } });
     if (!stored || stored.expiresAt < new Date()) throw new UnauthorizedException('INVALID_REFRESH_TOKEN');
 
@@ -264,8 +280,8 @@ export class AuthService {
     );
   }
 
-  private async hashToken(token: string): Promise<string> {
-    return bcrypt.hash(token, 8);
+  private hashToken(token: string): string {
+    return createHash('sha256').update(token).digest('hex');
   }
 
   private sanitizeUser(user: any) {
