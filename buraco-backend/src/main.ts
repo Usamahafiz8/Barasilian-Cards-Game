@@ -9,8 +9,12 @@ import { AppModule } from './app.module';
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
-  // Security
-  app.use(helmet());
+  // Security — CSP disabled so Swagger UI inline scripts load correctly
+  app.use(
+    helmet({
+      contentSecurityPolicy: false,
+    }),
+  );
   app.use(compression());
   app.enableCors({ origin: process.env.NODE_ENV === 'production' ? process.env.APP_URL : '*' });
 
