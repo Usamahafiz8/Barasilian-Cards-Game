@@ -52,13 +52,13 @@ async function bootstrap() {
     .build();
 
   const document = SwaggerModule.createDocument(app, swaggerConfig);
-  SwaggerModule.setup('api/docs', app, document, {
+  SwaggerModule.setup('/', app, document, {
     swaggerOptions: { persistAuthorization: true },
   });
 
   const port = process.env.PORT || 3000;
   await app.listen(port);
   console.log(`Barasilian Cards Game API running on port ${port}`);
-  console.log(`Swagger docs at http://localhost:${port}/api/docs`);
+  console.log(`Swagger docs at http://localhost:${port}/`);
 }
 bootstrap();
