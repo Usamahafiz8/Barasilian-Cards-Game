@@ -16,7 +16,10 @@ async function bootstrap() {
     }),
   );
   app.use(compression());
-  app.enableCors({ origin: process.env.NODE_ENV === 'production' ? process.env.APP_URL : '*' });
+  const allowedOrigins = process.env.CORS_ORIGINS
+    ? process.env.CORS_ORIGINS.split(',').map((o) => o.trim())
+    : '*';
+  app.enableCors({ origin: allowedOrigins, credentials: true });
 
   // Global prefix
   app.setGlobalPrefix('v1');
