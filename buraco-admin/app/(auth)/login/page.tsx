@@ -37,7 +37,7 @@ export default function LoginPage() {
           <div className="inline-flex items-center justify-center w-12 h-12 bg-blue-600 rounded-2xl text-white text-xl font-bold mb-4">
             B
           </div>
-          <h1 className="text-xl font-bold text-slate-900">Buraco Admin</h1>
+          <h1 className="text-xl font-bold text-slate-900">Barasilian Cards Game Admin</h1>
           <p className="text-sm text-slate-500 mt-1">Sign in to your admin account</p>
         </div>
 
@@ -52,7 +52,7 @@ export default function LoginPage() {
                 autoFocus
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                placeholder="admin@buraco.game"
+                placeholder="admin@barasilian.game"
                 className="block w-full rounded-lg border border-slate-200 px-3 py-2 text-sm
                   placeholder:text-slate-400 outline-none transition
                   focus:border-blue-500 focus:ring-1 focus:ring-blue-500 bg-white"
@@ -86,7 +86,7 @@ export default function LoginPage() {
           </form>
         </div>
 
-        <p className="text-center text-xs text-slate-400 mt-6">Buraco Card Game — Admin v1</p>
+        <p className="text-center text-xs text-slate-400 mt-6">Barasilian Cards Game — Admin v1</p>
       </div>
     </div>
   );

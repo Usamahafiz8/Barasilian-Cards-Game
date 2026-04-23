@@ -39,7 +39,7 @@ export default function Sidebar() {
             B
           </div>
           <div className="leading-tight">
-            <p className="text-sm font-semibold text-slate-900">Buraco Admin</p>
+            <p className="text-sm font-semibold text-slate-900">Barasilian Cards Game Admin</p>
             <p className="text-[11px] text-slate-400">Management Portal</p>
           </div>
         </div>

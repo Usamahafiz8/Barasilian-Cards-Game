@@ -6,8 +6,8 @@ import './globals.css';
 const geist = Geist({ subsets: ['latin'], variable: '--font-geist-sans' });
 
 export const metadata: Metadata = {
-  title: 'Buraco Admin',
-  description: 'Buraco Card Game — Admin Panel',
+  title: 'Barasilian Cards Game Admin',
+  description: 'Barasilian Cards Game — Admin Panel',
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

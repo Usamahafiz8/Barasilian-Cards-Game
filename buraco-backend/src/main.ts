@@ -29,8 +29,8 @@ async function bootstrap() {
 
   // Swagger
   const swaggerConfig = new DocumentBuilder()
-    .setTitle('Buraco Card Game API')
-    .setDescription('Server-authoritative multiplayer backend for Buraco card game')
+    .setTitle('Barasilian Cards Game API')
+    .setDescription('Server-authoritative multiplayer backend for Barasilian Cards Game')
     .setVersion('1.0')
     .addBearerAuth()
     .addTag('Auth')
@@ -58,7 +58,7 @@ async function bootstrap() {
 
   const port = process.env.PORT || 3000;
   await app.listen(port);
-  console.log(`Buraco API running on port ${port}`);
+  console.log(`Barasilian Cards Game API running on port ${port}`);
   console.log(`Swagger docs at http://localhost:${port}/api/docs`);
 }
 bootstrap();

@@ -29,8 +29,8 @@ export class MailService {
   }
 
   private async getFromAddress() {
-    const from = await this.sysConfig.get('smtp_from', this.config.get<string>('smtp.from') ?? 'noreply@buraco.game');
-    return `"Buraco Game" <${from}>`;
+    const from = await this.sysConfig.get('smtp_from', this.config.get<string>('smtp.from') ?? 'noreply@barasilian.game');
+    return `"Barasilian Cards Game" <${from}>`;
   }
 
   async sendPasswordReset(email: string, otp: string): Promise<void> {
@@ -63,11 +63,11 @@ export class MailService {
       await transporter.sendMail({
         from: await this.getFromAddress(),
         to: email,
-        subject: 'Welcome to Buraco!',
+        subject: 'Welcome to Barasilian Cards Game!',
         html: `
           <div style="font-family: Arial, sans-serif; max-width: 480px; margin: auto;">
             <h2>Welcome, ${username}!</h2>
-            <p>Your account has been created successfully. Get ready to play Buraco!</p>
+            <p>Your account has been created successfully. Get ready to play Barasilian Cards Game!</p>
             <p>Jump in and start your first game today.</p>
             <p>Good luck!</p>
           </div>
