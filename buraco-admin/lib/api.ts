@@ -1,9 +1,8 @@
 import axios from 'axios';
 import Cookies from 'js-cookie';
 
-const base = (process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3000').replace(/\/+$/, '');
 const api = axios.create({
-  baseURL: base.endsWith('/v1') ? base : `${base}/v1`,
+  baseURL: '/api/v1',
   timeout: 10_000,
 });
 

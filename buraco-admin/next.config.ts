@@ -1,7 +1,16 @@
 import type { NextConfig } from "next";
 
+const apiUrl = (process.env.API_URL ?? 'http://localhost:3000').replace(/\/+$/, '');
+
 const nextConfig: NextConfig = {
-  /* config options here */
+  async rewrites() {
+    return [
+      {
+        source: '/api/v1/:path*',
+        destination: `${apiUrl}/v1/:path*`,
+      },
+    ];
+  },
 };
 
 export default nextConfig;
