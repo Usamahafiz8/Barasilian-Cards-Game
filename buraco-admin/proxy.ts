@@ -13,6 +13,6 @@ export function proxy(req: NextRequest) {
 }
 
 export const config = {
-  // Exclude all Next.js internals and static assets; run only on real page routes
-  matcher: ['/((?!_next|favicon\\.ico|.*\\.svg|.*\\.png|.*\\.ico).*)'],
+  // Exclude Next.js internals, static assets, and API proxy routes
+  matcher: ['/((?!_next|api/|favicon\\.ico|.*\\.svg|.*\\.png|.*\\.ico).*)'],
 };
