@@ -19,6 +19,7 @@ import { CreatePromoDto } from './dto/create-promo.dto';
 import { SystemConfigDto } from './dto/system-config.dto';
 import { CreateShopItemDto } from './dto/create-shop-item.dto';
 import { EditUserDto } from './dto/edit-user.dto';
+import { CreateMissionDto } from './dto/create-mission.dto';
 
 @Injectable()
 export class AdminService {
@@ -355,6 +356,39 @@ export class AdminService {
     const updated = await this.prisma.mission.update({ where: { id: missionId }, data: { isActive } });
     await this.audit(adminId, isActive ? 'ACTIVATE_MISSION' : 'DEACTIVATE_MISSION', 'Mission', missionId, {});
     return updated;
+  }
+
+  async createMission(adminId: string, dto: CreateMissionDto) {
+    const mission = await this.prisma.mission.create({
+      data: {
+        title: dto.title,
+        description: dto.description,
+        type: dto.type,
+        requirement: dto.requirement,
+        targetValue: dto.targetValue,
+        rewardCoins: dto.rewardCoins ?? 0,
+        rewardDiamonds: dto.rewardDiamonds ?? 0,
+      },
+    });
+    await this.audit(adminId, 'CREATE_MISSION', 'Mission', mission.id, { title: mission.title });
+    return mission;
+  }
+
+  async updateMission(adminId: string, missionId: string, dto: Partial<CreateMissionDto>) {
+    const m = await this.prisma.mission.findUnique({ where: { id: missionId } });
+    if (!m) throw new NotFoundException('Mission not found');
+    const updated = await this.prisma.mission.update({ where: { id: missionId }, data: dto });
+    await this.audit(adminId, 'UPDATE_MISSION', 'Mission', missionId, { title: updated.title });
+    return updated;
+  }
+
+  async deleteMission(adminId: string, missionId: string) {
+    const m = await this.prisma.mission.findUnique({ where: { id: missionId } });
+    if (!m) throw new NotFoundException('Mission not found');
+    await this.prisma.missionProgress.deleteMany({ where: { missionId } });
+    await this.prisma.mission.delete({ where: { id: missionId } });
+    await this.audit(adminId, 'DELETE_MISSION', 'Mission', missionId, { title: m.title });
+    return { message: `Mission "${m.title}" deleted` };
   }
 
   // ─── Edit User ────────────────────────────────────────────────────────────

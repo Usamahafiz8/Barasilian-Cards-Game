@@ -17,6 +17,7 @@ import { CreatePromoDto } from './dto/create-promo.dto';
 import { SystemConfigDto } from './dto/system-config.dto';
 import { CreateShopItemDto } from './dto/create-shop-item.dto';
 import { EditUserDto } from './dto/edit-user.dto';
+import { CreateMissionDto } from './dto/create-mission.dto';
 
 @ApiTags('Admin')
 @Controller('admin')
@@ -335,6 +336,26 @@ export class AdminController {
     return this.adminService.listMissions();
   }
 
+  @Post('missions')
+  @UseGuards(AdminJwtGuard)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Create a mission' })
+  createMission(@CurrentUser('id') adminId: string, @Body() dto: CreateMissionDto) {
+    return this.adminService.createMission(adminId, dto);
+  }
+
+  @Patch('missions/:missionId')
+  @UseGuards(AdminJwtGuard)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Update a mission' })
+  updateMission(
+    @CurrentUser('id') adminId: string,
+    @Param('missionId') missionId: string,
+    @Body() dto: Partial<CreateMissionDto>,
+  ) {
+    return this.adminService.updateMission(adminId, missionId, dto);
+  }
+
   @Patch('missions/:missionId/toggle')
   @UseGuards(AdminJwtGuard)
   @ApiBearerAuth()
@@ -345,6 +366,14 @@ export class AdminController {
     @Body('isActive') isActive: boolean,
   ) {
     return this.adminService.toggleMission(adminId, missionId, isActive);
+  }
+
+  @Delete('missions/:missionId')
+  @UseGuards(AdminJwtGuard)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Delete a mission' })
+  deleteMission(@CurrentUser('id') adminId: string, @Param('missionId') missionId: string) {
+    return this.adminService.deleteMission(adminId, missionId);
   }
 
   // ─── Audit Logs ───────────────────────────────────────────────────────────
