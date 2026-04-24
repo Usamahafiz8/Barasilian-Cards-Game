@@ -1,6 +1,10 @@
 import type { NextConfig } from "next";
 
-const apiUrl = (process.env.API_URL ?? 'http://localhost:3000').replace(/\/+$/, '');
+const apiUrl = (
+  process.env.API_URL ??
+  process.env.NEXT_PUBLIC_API_URL ??
+  'http://localhost:3000'
+).replace(/\/+$/, '');
 
 const nextConfig: NextConfig = {
   async rewrites() {
