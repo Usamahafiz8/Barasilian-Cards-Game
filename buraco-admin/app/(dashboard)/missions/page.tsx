@@ -254,7 +254,7 @@ export default function MissionsPage() {
         <Modal title="New Mission" onClose={() => setShowCreate(false)}>
           <MissionForm />
           <div className="flex justify-end gap-2 mt-5">
-            <Button variant="secondary" onClick={() => setShowCreate(false)}>Cancel</Button>
+            <Button variant="outline" onClick={() => setShowCreate(false)}>Cancel</Button>
             <Button onClick={submitCreate} loading={saving} disabled={!form.title || !form.description}>Create</Button>
           </div>
         </Modal>
@@ -264,7 +264,7 @@ export default function MissionsPage() {
         <Modal title="Edit Mission" onClose={() => setEditTarget(null)}>
           <MissionForm />
           <div className="flex justify-end gap-2 mt-5">
-            <Button variant="secondary" onClick={() => setEditTarget(null)}>Cancel</Button>
+            <Button variant="outline" onClick={() => setEditTarget(null)}>Cancel</Button>
             <Button onClick={submitEdit} loading={saving} disabled={!form.title || !form.description}>Save Changes</Button>
           </div>
         </Modal>
@@ -277,7 +277,7 @@ export default function MissionsPage() {
             This will also remove all player progress for this mission.
           </p>
           <div className="flex justify-end gap-2 mt-5">
-            <Button variant="secondary" onClick={() => setConfirmDel(null)}>Cancel</Button>
+            <Button variant="outline" onClick={() => setConfirmDel(null)}>Cancel</Button>
             <Button onClick={confirmDelete} loading={!!deletingId}
               className="bg-red-600 hover:bg-red-700 text-white border-red-600">
               Delete
