@@ -100,6 +100,12 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     return JSON.parse(raw) as T;
   }
 
+  // Set only if the key does not already exist; returns 'OK' on success, null if key exists
+  setNx(key: string, value: string, ttlSeconds?: number): Promise<'OK' | null> {
+    if (ttlSeconds) return this.client.set(key, value, 'EX', ttlSeconds, 'NX');
+    return this.client.set(key, value, 'NX') as Promise<'OK' | null>;
+  }
+
   // Increment counter
   incr(key: string) {
     return this.client.incr(key);

@@ -15,7 +15,8 @@ import { MessagingService } from '../modules/messaging/messaging.service';
 import { NotificationsService } from '../modules/notifications/notifications.service';
 import { RedisService } from '../common/redis/redis.service';
 import { ReconnectionService } from '../modules/reconnection/reconnection.service';
-import { MoveType } from '@prisma/client';
+import { RoomsService } from '../modules/rooms/rooms.service';
+import { MoveType, RoomStatus } from '@prisma/client';
 import { Logger } from '@nestjs/common';
 
 @WebSocketGateway({ cors: { origin: '*' }, namespace: '/' })
@@ -34,6 +35,7 @@ export class AppGateway implements OnGatewayConnection, OnGatewayDisconnect {
     private notifications: NotificationsService,
     private redis: RedisService,
     private reconnection: ReconnectionService,
+    private roomsService: RoomsService,
   ) {}
 
   // ─── Connection ───────────────────────────────────────────────────────────
@@ -97,8 +99,42 @@ export class AppGateway implements OnGatewayConnection, OnGatewayDisconnect {
   }
 
   @SubscribeMessage('room:join')
-  handleRoomJoin(@ConnectedSocket() socket: Socket, @MessageBody() data: { roomId: string }) {
+  async handleRoomJoin(@ConnectedSocket() socket: Socket, @MessageBody() data: { roomId: string }) {
     socket.join(`room:${data.roomId}`);
+    socket.emit('room:joined_ack', { roomId: data.roomId });
+
+    const room = await this.roomsService.getRoom(data.roomId);
+    if (room.status !== RoomStatus.FULL) return;
+
+    // Only one socket wins the lock to avoid double-starting the game
+    const lockKey = `game:starting:${data.roomId}`;
+    const locked = await this.redis.setNx(lockKey, '1', 30);
+    if (!locked) return;
+
+    try {
+      const connectedSockets = await this.server.in(`room:${data.roomId}`).fetchSockets();
+      const playerIds = connectedSockets.map((s) => s.data.userId as string).filter(Boolean);
+
+      if (playerIds.length < room.maxPlayers) {
+        await this.redis.del(lockKey);
+        this.logger.warn(`Room ${data.roomId} is FULL but only ${playerIds.length}/${room.maxPlayers} sockets connected`);
+        return;
+      }
+
+      const gameState = await this.gameEngine.startGame(data.roomId, room.mode, room.variant, playerIds);
+      await this.roomsService.transitionToInProgress(data.roomId, gameState.gameId);
+
+      this.server.to(`room:${data.roomId}`).emit('room:update', {
+        roomId: data.roomId,
+        gameId: gameState.gameId,
+        status: 'IN_PROGRESS',
+      });
+      this.logger.log(`Game ${gameState.gameId} started for room ${data.roomId}`);
+    } catch (err) {
+      await this.redis.del(lockKey);
+      this.logger.error(`Failed to start game for room ${data.roomId}`, err);
+      socket.emit('error', { code: 'GAME_START_FAILED', message: err.message });
+    }
   }
 
   @SubscribeMessage('room:leave')
