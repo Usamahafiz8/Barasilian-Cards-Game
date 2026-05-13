@@ -1,0 +1,864 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Buraco Plus — Unity Socket.io Integration Guide</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Segoe UI', Arial, sans-serif;
+    font-size: 13px;
+    color: #1a1a2e;
+    background: #fff;
+    line-height: 1.6;
+  }
+
+  /* ── Cover Page ── */
+  .cover {
+    width: 100%;
+    min-height: 100vh;
+    background: linear-gradient(135deg, #0f3460 0%, #16213e 60%, #0f3460 100%);
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    text-align: center;
+    padding: 60px 40px;
+    page-break-after: always;
+  }
+  .cover .badge {
+    background: rgba(255,255,255,0.12);
+    border: 1px solid rgba(255,255,255,0.25);
+    color: #e0e0e0;
+    font-size: 11px;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    padding: 6px 18px;
+    border-radius: 20px;
+    margin-bottom: 32px;
+  }
+  .cover h1 {
+    font-size: 38px;
+    font-weight: 800;
+    color: #fff;
+    line-height: 1.2;
+    margin-bottom: 16px;
+  }
+  .cover h1 span { color: #e94560; }
+  .cover .subtitle {
+    font-size: 16px;
+    color: #a0b4cc;
+    margin-bottom: 48px;
+    max-width: 480px;
+  }
+  .cover .divider {
+    width: 60px;
+    height: 3px;
+    background: #e94560;
+    border-radius: 2px;
+    margin: 0 auto 48px;
+  }
+  .cover .meta-grid {
+    display: flex;
+    gap: 40px;
+    justify-content: center;
+    flex-wrap: wrap;
+  }
+  .cover .meta-item {
+    text-align: center;
+  }
+  .cover .meta-item .label {
+    font-size: 10px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: #6b8cae;
+    margin-bottom: 4px;
+  }
+  .cover .meta-item .value {
+    font-size: 13px;
+    font-weight: 600;
+    color: #c8d8e8;
+  }
+
+  /* ── Content pages ── */
+  .page {
+    max-width: 820px;
+    margin: 0 auto;
+    padding: 48px 56px;
+  }
+
+  /* ── Section headers ── */
+  .section-header {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin: 40px 0 20px;
+    padding-bottom: 10px;
+    border-bottom: 2px solid #e8edf5;
+  }
+  .section-num {
+    background: #0f3460;
+    color: #fff;
+    font-size: 11px;
+    font-weight: 700;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+  .section-header h2 {
+    font-size: 18px;
+    font-weight: 700;
+    color: #0f3460;
+    letter-spacing: -0.3px;
+  }
+
+  h3 {
+    font-size: 13px;
+    font-weight: 700;
+    color: #0f3460;
+    margin: 22px 0 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+  }
+
+  p { margin-bottom: 10px; color: #374151; }
+
+  /* ── Callout boxes ── */
+  .callout {
+    border-left: 4px solid #e94560;
+    background: #fff5f7;
+    padding: 14px 18px;
+    border-radius: 0 6px 6px 0;
+    margin: 16px 0;
+  }
+  .callout.blue {
+    border-color: #0f3460;
+    background: #f0f4ff;
+  }
+  .callout.green {
+    border-color: #10b981;
+    background: #f0fdf4;
+  }
+  .callout.orange {
+    border-color: #f59e0b;
+    background: #fffbeb;
+  }
+  .callout strong { display: block; margin-bottom: 4px; font-size: 12px; }
+
+  /* ── Code blocks ── */
+  pre, code {
+    font-family: 'Consolas', 'Courier New', monospace;
+  }
+  pre {
+    background: #0d1117;
+    color: #e6edf3;
+    padding: 18px 20px;
+    border-radius: 8px;
+    font-size: 11.5px;
+    line-height: 1.7;
+    overflow-x: auto;
+    margin: 12px 0 18px;
+  }
+  pre .comment { color: #8b949e; }
+  pre .keyword { color: #ff7b72; }
+  pre .string  { color: #a5d6ff; }
+  pre .event   { color: #79c0ff; }
+  pre .value   { color: #ffa657; }
+  code {
+    background: #eef2f7;
+    color: #c7254e;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 11.5px;
+  }
+
+  /* ── Tables ── */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 12px 0 20px;
+    font-size: 12px;
+  }
+  thead tr { background: #0f3460; color: #fff; }
+  thead th {
+    padding: 10px 14px;
+    text-align: left;
+    font-weight: 600;
+    font-size: 11px;
+    letter-spacing: 0.5px;
+  }
+  tbody tr:nth-child(even) { background: #f8f9fc; }
+  tbody tr:hover { background: #eef2ff; }
+  tbody td {
+    padding: 9px 14px;
+    border-bottom: 1px solid #e8edf5;
+    color: #374151;
+    vertical-align: top;
+  }
+  .tag {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.3px;
+  }
+  .tag.emit  { background: #dbeafe; color: #1d4ed8; }
+  .tag.recv  { background: #d1fae5; color: #065f46; }
+  .tag.req   { background: #fef3c7; color: #92400e; }
+  .tag.post  { background: #ede9fe; color: #5b21b6; }
+  .tag.get   { background: #d1fae5; color: #065f46; }
+  .tag.del   { background: #fee2e2; color: #991b1b; }
+
+  /* ── Flow steps ── */
+  .flow {
+    counter-reset: step;
+    margin: 14px 0 20px;
+  }
+  .flow-step {
+    display: flex;
+    gap: 14px;
+    margin-bottom: 10px;
+    align-items: flex-start;
+  }
+  .flow-step::before {
+    counter-increment: step;
+    content: counter(step);
+    background: #e94560;
+    color: #fff;
+    font-size: 11px;
+    font-weight: 700;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    margin-top: 1px;
+  }
+  .flow-step p { margin: 0; }
+
+  /* ── Page break ── */
+  .page-break { page-break-before: always; }
+
+  /* ── TOC ── */
+  .toc { margin: 24px 0; }
+  .toc-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    padding: 6px 0;
+    border-bottom: 1px dotted #d1d5db;
+    color: #374151;
+    font-size: 13px;
+  }
+  .toc-item .num { color: #6b7280; font-size: 11px; margin-right: 8px; }
+  .toc-item .pg  { color: #9ca3af; font-size: 11px; }
+
+  /* ── Footer ── */
+  .footer {
+    text-align: center;
+    margin-top: 48px;
+    padding-top: 16px;
+    border-top: 1px solid #e8edf5;
+    color: #9ca3af;
+    font-size: 11px;
+  }
+
+  @media print {
+    body { font-size: 12px; }
+    .cover { min-height: auto; padding: 80px 40px; }
+    pre { font-size: 10.5px; }
+    .page { padding: 36px 48px; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ═══════════════════════════════ COVER ═══════════════════════════════ -->
+<div class="cover">
+  <div class="badge">Technical Integration Guide</div>
+  <h1>Buraco Plus<br><span>Unity ↔ Backend</span><br>Socket.io / RPC Guide</h1>
+  <p class="subtitle">How the Unity client communicates with the server — connection, authentication, real-time events, and game flow</p>
+  <div class="divider"></div>
+  <div class="meta-grid">
+    <div class="meta-item">
+      <div class="label">Date</div>
+      <div class="value">2026-05-13</div>
+    </div>
+    <div class="meta-item">
+      <div class="label">Backend</div>
+      <div class="value">NestJS · Socket.io</div>
+    </div>
+    <div class="meta-item">
+      <div class="label">Client</div>
+      <div class="value">Unity (C#)</div>
+    </div>
+    <div class="meta-item">
+      <div class="label">Protocol</div>
+      <div class="value">WebSocket / REST</div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════ CONTENT ═══════════════════════════════ -->
+<div class="page">
+
+  <!-- Table of Contents -->
+  <div class="section-header">
+    <div class="section-num">—</div>
+    <h2>Table of Contents</h2>
+  </div>
+  <div class="toc">
+    <div class="toc-item"><span><span class="num">1.</span> Photon vs Socket.io — Why We Use Socket.io</span></div>
+    <div class="toc-item"><span><span class="num">2.</span> Unity Setup — Installing the Socket.io Client</span></div>
+    <div class="toc-item"><span><span class="num">3.</span> Connecting &amp; Authenticating</span></div>
+    <div class="toc-item"><span><span class="num">4.</span> Complete WebSocket Event Reference</span></div>
+    <div class="toc-item"><span><span class="num">5.</span> Full Game Flow — Step by Step</span></div>
+    <div class="toc-item"><span><span class="num">6.</span> Matchmaking Flow</span></div>
+    <div class="toc-item"><span><span class="num">7.</span> Reconnection Flow</span></div>
+    <div class="toc-item"><span><span class="num">8.</span> REST API Quick Reference</span></div>
+    <div class="toc-item"><span><span class="num">9.</span> Unity C# Code Examples</span></div>
+    <div class="toc-item"><span><span class="num">10.</span> Error Handling</span></div>
+  </div>
+
+  <!-- ─── SECTION 1 ─── -->
+  <div class="section-header">
+    <div class="section-num">1</div>
+    <h2>Photon vs Socket.io — Why We Use Socket.io</h2>
+  </div>
+
+  <div class="callout">
+    <strong>⚠ Photon is NOT used in this project</strong>
+    The backend uses Socket.io WebSocket. Do not install or use the Photon SDK.
+  </div>
+
+  <table>
+    <thead>
+      <tr><th>Feature</th><th>Photon PUN</th><th>Our Socket.io Backend</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Game authority</td><td>Client-side (peer-to-peer)</td><td>Server-authoritative ✅</td></tr>
+      <tr><td>Cheat prevention</td><td>None — any client can fake moves</td><td>All moves validated server-side ✅</td></tr>
+      <tr><td>Economy / scoring</td><td>Cannot be trusted</td><td>Calculated on server, tamper-proof ✅</td></tr>
+      <tr><td>Custom business logic</td><td>Limited (cloud code only)</td><td>Full NestJS backend, any logic ✅</td></tr>
+      <tr><td>Cost</td><td>Paid per CCU</td><td>Your own server, no per-CCU fees ✅</td></tr>
+      <tr><td>RPC calls</td><td>photonView.RPC()</td><td>socket.emit() → server validates → broadcast ✅</td></tr>
+    </tbody>
+  </table>
+
+  <p>In Photon, <code>photonView.RPC("MethodName", target, args)</code> calls a method directly on other clients. In our system, the equivalent is <strong>emitting a socket event to the server</strong>. The server validates the action and then broadcasts the result to all players in the game room. This is exactly like Photon RPC — but the logic runs on the server, not on the clients.</p>
+
+  <div class="callout blue">
+    <strong>Photon RPC equivalent in our system</strong>
+    Photon: <code>photonView.RPC("PlayCard", RpcTarget.All, cardId)</code><br>
+    Our system: <code>socket.Emit("game:move:discard", new { gameId, cardId })</code> → server validates → broadcasts <code>game:move_played</code> to all players
+  </div>
+
+  <!-- ─── SECTION 2 ─── -->
+  <div class="section-header">
+    <div class="section-num">2</div>
+    <h2>Unity Setup — Installing the Socket.io Client</h2>
+  </div>
+
+  <h3>Package to Use</h3>
+  <p>Install <strong>SocketIOUnity</strong> by itisnajim — the official Socket.io v4 client for Unity.</p>
+
+  <div class="callout blue">
+    <strong>GitHub</strong>
+    https://github.com/itisnajim/SocketIOUnity
+  </div>
+
+  <h3>Installation (Unity Package Manager)</h3>
+  <p>In Unity: <strong>Window → Package Manager → + → Add package from git URL</strong></p>
+<pre>https://github.com/itisnajim/SocketIOUnity.git</pre>
+
+  <h3>Required NuGet Packages</h3>
+  <table>
+    <thead><tr><th>Package</th><th>Version</th><th>Purpose</th></tr></thead>
+    <tbody>
+      <tr><td>SocketIOUnity</td><td>latest</td><td>Socket.io v4 client</td></tr>
+      <tr><td>Newtonsoft.Json</td><td>≥ 13.x</td><td>JSON serialization (usually pre-installed in Unity)</td></tr>
+    </tbody>
+  </table>
+
+  <!-- ─── SECTION 3 ─── -->
+  <div class="section-header">
+    <div class="section-num">3</div>
+    <h2>Connecting &amp; Authenticating</h2>
+  </div>
+
+  <h3>WebSocket URL</h3>
+<pre><span class="string">wss://your-backend-domain.com/</span>
+<span class="comment">// Development (local):</span>
+<span class="string">ws://localhost:3000/</span></pre>
+
+  <h3>Authentication</h3>
+  <p>The JWT access token (obtained from <code>POST /auth/login</code>) must be passed in the Socket.io handshake <code>auth</code> object. The server rejects connections without a valid token.</p>
+
+<pre><span class="comment">// Pass token on connection — NOT in headers</span>
+var options = <span class="keyword">new</span> SocketIOOptions {
+    Auth = <span class="keyword">new</span> Dictionary&lt;string, string&gt; {
+        { <span class="string">"token"</span>, accessToken }
+    }
+};
+socket = <span class="keyword">new</span> SocketIOUnity(serverUrl, options);</pre>
+
+  <h3>Connection Acknowledgement</h3>
+  <p>On successful connection the server immediately emits <code>connect_ack</code>:</p>
+<pre>{
+  <span class="string">"userId"</span>:   <span class="string">"uuid-of-the-authenticated-user"</span>,
+  <span class="string">"socketId"</span>: <span class="string">"socket-io-session-id"</span>
+}</pre>
+
+  <div class="callout green">
+    <strong>✅ Store userId from connect_ack</strong>
+    Use this userId throughout the session to identify the local player in all game state responses.
+  </div>
+
+  <h3>Keepalive / Presence</h3>
+  <p>Send a <code>ping</code> event every 20 seconds to maintain online presence. If you stop pinging, the server marks you offline after 30 seconds.</p>
+<pre>socket.Emit(<span class="string">"ping"</span>);
+<span class="comment">// Server replies with: { "timestamp": 1715600000000 }</span></pre>
+
+  <!-- ─── SECTION 4 ─── -->
+  <div class="page-break"></div>
+  <div class="section-header">
+    <div class="section-num">4</div>
+    <h2>Complete WebSocket Event Reference</h2>
+  </div>
+
+  <h3>Client → Server  (events you EMIT)</h3>
+  <table>
+    <thead>
+      <tr><th>Event</th><th>Payload</th><th>When to use</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>ping</code></td>
+        <td>—</td>
+        <td>Every 20s to stay online</td>
+      </tr>
+      <tr>
+        <td><code>room:subscribe</code></td>
+        <td>—</td>
+        <td>Join lobby feed (see room list updates)</td>
+      </tr>
+      <tr>
+        <td><code>room:unsubscribe</code></td>
+        <td>—</td>
+        <td>Leave lobby feed</td>
+      </tr>
+      <tr>
+        <td><code>room:join</code></td>
+        <td><code>"roomId"</code> <em>or</em> <code>{ roomId }</code></td>
+        <td>After joining via REST — subscribe to room events</td>
+      </tr>
+      <tr>
+        <td><code>room:leave</code></td>
+        <td><code>{ roomId }</code></td>
+        <td>Unsubscribe from room channel</td>
+      </tr>
+      <tr>
+        <td><code>game:join</code></td>
+        <td><code>{ gameId }</code></td>
+        <td>After <code>room:update</code> fires — subscribe to game events</td>
+      </tr>
+      <tr>
+        <td><code>game:reconnect</code></td>
+        <td><code>{ gameId }</code></td>
+        <td>Returning after disconnect — receive full state sync</td>
+      </tr>
+      <tr>
+        <td><code>game:move:draw</code></td>
+        <td><code>{ gameId, source: "STOCK" | "DISCARD" }</code></td>
+        <td>Draw a card on your turn</td>
+      </tr>
+      <tr>
+        <td><code>game:move:discard</code></td>
+        <td><code>{ gameId, cardId }</code></td>
+        <td>Discard a card to end your turn</td>
+      </tr>
+      <tr>
+        <td><code>game:move:meld</code></td>
+        <td><code>{ gameId, cardIds: string[] }</code></td>
+        <td>Play 3+ cards as a new meld</td>
+      </tr>
+      <tr>
+        <td><code>chat:send</code></td>
+        <td><code>{ conversationId, content }</code></td>
+        <td>Send a text message</td>
+      </tr>
+      <tr>
+        <td><code>chat:typing</code></td>
+        <td><code>{ conversationId, isTyping }</code></td>
+        <td>Broadcast typing indicator</td>
+      </tr>
+      <tr>
+        <td><code>chat:read</code></td>
+        <td><code>{ conversationId }</code></td>
+        <td>Mark conversation as read</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>Server → Client  (events you LISTEN for)</h3>
+  <table>
+    <thead>
+      <tr><th>Event</th><th>Payload</th><th>Meaning</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>connect_ack</code></td><td><code>{ userId, socketId }</code></td><td>Auth succeeded, connection open</td></tr>
+      <tr><td><code>error</code></td><td><code>{ code, message }</code></td><td>Auth failed or server error</td></tr>
+      <tr><td><code>pong</code></td><td><code>{ timestamp }</code></td><td>Reply to ping</td></tr>
+      <tr><td><code>room:joined_ack</code></td><td><code>{ roomId }</code></td><td>Subscribed to room channel</td></tr>
+      <tr><td><code>room:list_update</code></td><td><code>{ action, room }</code></td><td>Room created or closed (lobby)</td></tr>
+      <tr><td><code>room:player_joined</code></td><td><code>{ roomId, player, currentPlayers, maxPlayers }</code></td><td>Someone joined your room</td></tr>
+      <tr><td><code>room:player_left</code></td><td><code>{ roomId, userId, username, currentPlayers }</code></td><td>Someone left the room</td></tr>
+      <tr><td><code><strong>room:update</strong></code></td><td><code>{ roomId, gameId, status: "IN_PROGRESS" }</code></td><td><strong>Game has started — save gameId, emit game:join</strong></td></tr>
+      <tr><td><code>game:state_sync</code></td><td>Full game state (see §6)</td><td>Full state on reconnect</td></tr>
+      <tr><td><code><strong>game:move_played</strong></code></td><td><code>{ gameId, playerId, moveType, result, nextTurnPlayerId }</code></td><td><strong>A move was executed — update UI</strong></td></tr>
+      <tr><td><code>game:move_invalid</code></td><td><code>{ gameId, reason }</code></td><td>Your move was rejected — show error</td></tr>
+      <tr><td><code><strong>game:end</strong></code></td><td><code>{ gameId, winnerTeam, winnerIds, scores, duration }</code></td><td><strong>Game over</strong></td></tr>
+      <tr><td><code>game:player_disconnected</code></td><td><code>{ gameId, playerId, reconnectWindowSeconds }</code></td><td>Opponent disconnected</td></tr>
+      <tr><td><code>game:player_reconnected</code></td><td><code>{ gameId, playerId }</code></td><td>Opponent came back</td></tr>
+      <tr><td><code>chat:message</code></td><td>Message object</td><td>New text or voice message</td></tr>
+      <tr><td><code>chat:typing</code></td><td><code>{ conversationId, userId, isTyping }</code></td><td>Typing indicator</td></tr>
+      <tr><td><code>chat:read_receipt</code></td><td><code>{ conversationId, readByUserId, readAt }</code></td><td>Messages read by other party</td></tr>
+      <tr><td><code>notification:new</code></td><td>Notification object</td><td>Push-style in-app notification</td></tr>
+    </tbody>
+  </table>
+
+  <!-- ─── SECTION 5 ─── -->
+  <div class="page-break"></div>
+  <div class="section-header">
+    <div class="section-num">5</div>
+    <h2>Full Game Flow — Step by Step</h2>
+  </div>
+
+  <h3>Phase 1 — Login &amp; Connect</h3>
+  <div class="flow">
+    <div class="flow-step"><p>Call <code>POST /auth/login</code> → receive <code>access_token</code></p></div>
+    <div class="flow-step"><p>Open Socket.io connection with <code>auth: { token }</code></p></div>
+    <div class="flow-step"><p>Listen for <code>connect_ack</code> → store <code>userId</code></p></div>
+    <div class="flow-step"><p>Start sending <code>ping</code> every 20 seconds</p></div>
+  </div>
+
+  <h3>Phase 2 — Find a Game</h3>
+  <div class="flow">
+    <div class="flow-step"><p>Call <code>POST /matchmaking/join { mode, variant }</code> OR call <code>POST /rooms/:roomId/join</code></p></div>
+    <div class="flow-step"><p>Emit <code>room:join</code> with the <code>roomId</code> on WebSocket</p></div>
+    <div class="flow-step"><p>Listen for <code>room:player_joined</code> — show lobby screen with player list</p></div>
+    <div class="flow-step"><p>When room is full, server starts the game automatically</p></div>
+    <div class="flow-step"><p>Receive <code>room:update { status: "IN_PROGRESS", gameId }</code> — <strong>save gameId</strong></p></div>
+    <div class="flow-step"><p>Emit <code>game:join { gameId }</code> to subscribe to game events</p></div>
+  </div>
+
+  <h3>Phase 3 — In-Game Turn Loop</h3>
+
+  <div class="callout orange">
+    <strong>Check currentPlayerId first</strong>
+    Only enable UI controls when <code>state.currentPlayerId === myUserId</code>. Disable all controls on opponent turns.
+  </div>
+
+  <div class="flow">
+    <div class="flow-step"><p><strong>Your turn starts</strong> — <code>nextTurnPlayerId</code> in last <code>game:move_played</code> matches your userId</p></div>
+    <div class="flow-step"><p>Player taps "Draw from deck" → emit <code>game:move:draw { gameId, source: "STOCK" }</code></p></div>
+    <div class="flow-step"><p>Receive <code>game:move_played</code> → update hand display with drawn card</p></div>
+    <div class="flow-step"><p><em>(Optional)</em> Player plays a meld → emit <code>game:move:meld { gameId, cardIds }</code></p></div>
+    <div class="flow-step"><p>Receive <code>game:move_played</code> → remove melded cards from hand, show meld on table</p></div>
+    <div class="flow-step"><p>Player taps a card to discard → emit <code>game:move:discard { gameId, cardId }</code></p></div>
+    <div class="flow-step"><p>Receive <code>game:move_played</code> → <code>nextTurnPlayerId</code> is now the opponent</p></div>
+    <div class="flow-step"><p>Opponent turn plays out — listen to <code>game:move_played</code> to keep UI in sync</p></div>
+  </div>
+
+  <h3>Phase 4 — Game Ends</h3>
+  <div class="flow">
+    <div class="flow-step"><p>Server emits <code>game:end { winnerTeam, winnerIds, scores, duration }</code></p></div>
+    <div class="flow-step"><p>Show results screen</p></div>
+    <div class="flow-step"><p>Call <code>GET /stats/me</code> and <code>GET /economy/balance</code> to refresh UI with updated rewards</p></div>
+  </div>
+
+  <!-- ─── SECTION 6 ─── -->
+  <div class="section-header">
+    <div class="section-num">6</div>
+    <h2>Matchmaking Flow</h2>
+  </div>
+
+<pre><span class="comment">// 1. Join matchmaking queue (REST)</span>
+POST /matchmaking/join
+{
+  <span class="string">"mode"</span>:    <span class="string">"CLASSIC"</span>,     <span class="comment">// or "PROFESSIONAL"</span>
+  <span class="string">"variant"</span>: <span class="string">"ONE_VS_ONE"</span>  <span class="comment">// or "TWO_VS_TWO"</span>
+}
+<span class="comment">// Response: { queueId, estimatedWaitSeconds }</span>
+
+<span class="comment">// 2. Make sure socket is connected + room:subscribe emitted</span>
+socket.Emit(<span class="string">"room:subscribe"</span>);
+
+<span class="comment">// 3. Server finds match → emits room:update to both players</span>
+<span class="comment">// Listen for:</span>
+socket.On(<span class="string">"room:update"</span>, data => {
+    <span class="comment">// { roomId, gameId, status: "IN_PROGRESS" }</span>
+    gameId = data.gameId;
+    socket.Emit(<span class="string">"game:join"</span>, <span class="keyword">new</span> { gameId });
+});</pre>
+
+  <div class="callout">
+    <strong>Entry Fees</strong>
+    CLASSIC 1v1 costs 100 coins. CLASSIC 2v2 costs 200 coins. PROFESSIONAL 1v1 costs 500 coins. PROFESSIONAL requires an active subscription. Coins are deducted when you join the queue.
+  </div>
+
+  <!-- ─── SECTION 7 ─── -->
+  <div class="section-header">
+    <div class="section-num">7</div>
+    <h2>Reconnection Flow</h2>
+  </div>
+
+  <p>If the player loses connection mid-game, the server holds state in Redis for a configurable window (default 30 seconds).</p>
+
+<pre><span class="comment">// On app resume / socket reconnect:</span>
+
+<span class="comment">// 1. Reconnect socket with same auth token</span>
+socket.Connect();
+
+<span class="comment">// 2. Check if player was in an active game</span>
+<span class="comment">// (store gameId locally in PlayerPrefs before disconnect)</span>
+
+<span class="comment">// 3. Emit game:reconnect</span>
+socket.Emit(<span class="string">"game:reconnect"</span>, <span class="keyword">new</span> { gameId });
+
+<span class="comment">// 4. Server sends full state sync</span>
+socket.On(<span class="string">"game:state_sync"</span>, state => {
+    <span class="comment">// Full game state — rebuild the UI from scratch</span>
+    RebuildGameUI(state);
+});
+
+<span class="comment">// 5. Server notifies opponent</span>
+<span class="comment">// Opponent receives: game:player_reconnected { gameId, playerId }</span></pre>
+
+  <div class="callout orange">
+    <strong>Store gameId in PlayerPrefs</strong>
+    Always persist the active <code>gameId</code> locally so you can reconnect after a crash or background kill.
+  </div>
+
+  <!-- ─── SECTION 8 ─── -->
+  <div class="page-break"></div>
+  <div class="section-header">
+    <div class="section-num">8</div>
+    <h2>REST API Quick Reference</h2>
+  </div>
+
+  <p>All REST endpoints use <code>Authorization: Bearer &lt;access_token&gt;</code>. Base URL: <code>https://your-domain.com/api</code></p>
+
+  <table>
+    <thead><tr><th>Method</th><th>Endpoint</th><th>Description</th></tr></thead>
+    <tbody>
+      <tr><td><span class="tag post">POST</span></td><td><code>/auth/login</code></td><td>Login → returns <code>access_token</code></td></tr>
+      <tr><td><span class="tag post">POST</span></td><td><code>/auth/register</code></td><td>Create account</td></tr>
+      <tr><td><span class="tag get">GET</span></td><td><code>/auth/me</code></td><td>Current user info</td></tr>
+      <tr><td><span class="tag post">POST</span></td><td><code>/matchmaking/join</code></td><td>Join queue <code>{ mode, variant }</code></td></tr>
+      <tr><td><span class="tag del">DEL</span></td><td><code>/matchmaking/leave</code></td><td>Leave queue</td></tr>
+      <tr><td><span class="tag get">GET</span></td><td><code>/matchmaking/status</code></td><td>Queue position + wait time</td></tr>
+      <tr><td><span class="tag get">GET</span></td><td><code>/rooms</code></td><td>Browse open rooms</td></tr>
+      <tr><td><span class="tag post">POST</span></td><td><code>/rooms</code></td><td>Create private room</td></tr>
+      <tr><td><span class="tag post">POST</span></td><td><code>/rooms/:id/join</code></td><td>Join a room</td></tr>
+      <tr><td><span class="tag post">POST</span></td><td><code>/rooms/:id/leave</code></td><td>Leave a room</td></tr>
+      <tr><td><span class="tag get">GET</span></td><td><code>/game/:gameId/state</code></td><td>Fetch current game state (your view)</td></tr>
+      <tr><td><span class="tag post">POST</span></td><td><code>/game/:gameId/move/draw</code></td><td>Draw card <code>{ source }</code></td></tr>
+      <tr><td><span class="tag post">POST</span></td><td><code>/game/:gameId/move/meld</code></td><td>Play meld <code>{ cardIds }</code></td></tr>
+      <tr><td><span class="tag post">POST</span></td><td><code>/game/:gameId/move/add-to-meld</code></td><td>Extend meld <code>{ meldId, cardIds }</code></td></tr>
+      <tr><td><span class="tag post">POST</span></td><td><code>/game/:gameId/move/discard</code></td><td>Discard <code>{ cardId }</code></td></tr>
+      <tr><td><span class="tag post">POST</span></td><td><code>/game/:gameId/move/pickup-pot</code></td><td>Pick up pot pile</td></tr>
+      <tr><td><span class="tag get">GET</span></td><td><code>/stats/me</code></td><td>My XP, level, wins, losses</td></tr>
+      <tr><td><span class="tag get">GET</span></td><td><code>/economy/balance</code></td><td>Coin balance</td></tr>
+      <tr><td><span class="tag get">GET</span></td><td><code>/rankings</code></td><td>Global leaderboard</td></tr>
+      <tr><td><span class="tag get">GET</span></td><td><code>/match-history</code></td><td>Past games</td></tr>
+      <tr><td><span class="tag get">GET</span></td><td><code>/notifications</code></td><td>In-app notifications</td></tr>
+      <tr><td><span class="tag post">POST</span></td><td><code>/messaging/conversations/:id/voice</code></td><td>Upload voice message (multipart)</td></tr>
+    </tbody>
+  </table>
+
+  <!-- ─── SECTION 9 ─── -->
+  <div class="section-header">
+    <div class="section-num">9</div>
+    <h2>Unity C# Code Examples</h2>
+  </div>
+
+  <h3>Manager Class Setup</h3>
+<pre><span class="keyword">using</span> SocketIOClient;
+<span class="keyword">using</span> SocketIOClient.Transport;
+
+<span class="keyword">public class</span> GameSocketManager : MonoBehaviour
+{
+    <span class="keyword">private</span> SocketIOUnity socket;
+    <span class="keyword">private string</span> gameId;
+    <span class="keyword">private string</span> myUserId;
+
+    <span class="keyword">void</span> Connect(<span class="keyword">string</span> serverUrl, <span class="keyword">string</span> accessToken)
+    {
+        var uri = <span class="keyword">new</span> Uri(serverUrl);
+        socket = <span class="keyword">new</span> SocketIOUnity(uri, <span class="keyword">new</span> SocketIOOptions {
+            Transport = TransportProtocol.WebSocket,
+            Auth = <span class="keyword">new</span> Dictionary&lt;<span class="keyword">string</span>, <span class="keyword">string</span>&gt; {
+                { <span class="string">"token"</span>, accessToken }
+            }
+        });
+
+        RegisterListeners();
+        socket.Connect();
+    }
+}</pre>
+
+  <h3>Registering Listeners</h3>
+<pre><span class="keyword">void</span> RegisterListeners()
+{
+    socket.On(<span class="string">"connect_ack"</span>, resp => {
+        <span class="keyword">var</span> data = resp.GetValue&lt;ConnectAck&gt;();
+        myUserId = data.userId;
+        Debug.Log(<span class="string">$"Connected as {myUserId}"</span>);
+    });
+
+    socket.On(<span class="string">"room:update"</span>, resp => {
+        <span class="keyword">var</span> data = resp.GetValue&lt;RoomUpdate&gt;();
+        <span class="keyword">if</span> (data.status == <span class="string">"IN_PROGRESS"</span>) {
+            gameId = data.gameId;
+            socket.Emit(<span class="string">"game:join"</span>, <span class="keyword">new</span> { gameId });
+        }
+    });
+
+    socket.On(<span class="string">"game:move_played"</span>, resp => {
+        <span class="keyword">var</span> move = resp.GetValue&lt;MovePlayed&gt;();
+        GameUIManager.Instance.ApplyMove(move);
+    });
+
+    socket.On(<span class="string">"game:move_invalid"</span>, resp => {
+        <span class="keyword">var</span> err = resp.GetValue&lt;MoveInvalid&gt;();
+        UIToast.Show(err.reason);   <span class="comment">// e.g. "NOT_YOUR_TURN"</span>
+    });
+
+    socket.On(<span class="string">"game:end"</span>, resp => {
+        <span class="keyword">var</span> result = resp.GetValue&lt;GameEnd&gt;();
+        ResultsScreen.Show(result);
+    });
+
+    socket.On(<span class="string">"game:player_disconnected"</span>, resp => {
+        <span class="keyword">var</span> data = resp.GetValue&lt;PlayerDisconnected&gt;();
+        UIToast.Show(<span class="string">$"Opponent disconnected. Reconnect window: {data.reconnectWindowSeconds}s"</span>);
+    });
+
+    socket.On(<span class="string">"error"</span>, resp => {
+        <span class="keyword">var</span> err = resp.GetValue&lt;ServerError&gt;();
+        <span class="keyword">if</span> (err.code == <span class="string">"AUTH_FAILED"</span>) NavigateToLogin();
+    });
+}</pre>
+
+  <h3>Emitting Game Moves</h3>
+<pre><span class="comment">// Draw a card from the stock pile</span>
+<span class="keyword">public void</span> DrawFromStock()
+{
+    socket.Emit(<span class="string">"game:move:draw"</span>, <span class="keyword">new</span> {
+        gameId = <span class="keyword">this</span>.gameId,
+        source = <span class="string">"STOCK"</span>
+    });
+}
+
+<span class="comment">// Discard a card (ends your turn)</span>
+<span class="keyword">public void</span> DiscardCard(<span class="keyword">string</span> cardId)
+{
+    socket.Emit(<span class="string">"game:move:discard"</span>, <span class="keyword">new</span> {
+        gameId = <span class="keyword">this</span>.gameId,
+        cardId
+    });
+}
+
+<span class="comment">// Play a meld (3+ cards)</span>
+<span class="keyword">public void</span> PlayMeld(List&lt;<span class="keyword">string</span>&gt; cardIds)
+{
+    socket.Emit(<span class="string">"game:move:meld"</span>, <span class="keyword">new</span> {
+        gameId = <span class="keyword">this</span>.gameId,
+        cardIds
+    });
+}</pre>
+
+  <h3>Reconnection Logic</h3>
+<pre><span class="keyword">void</span> OnApplicationFocus(<span class="keyword">bool</span> hasFocus)
+{
+    <span class="keyword">if</span> (hasFocus &amp;&amp; !socket.Connected)
+    {
+        socket.Connect();   <span class="comment">// re-uses same auth token</span>
+    }
+}
+
+<span class="keyword">void</span> OnConnectAck(ConnectAck ack)
+{
+    <span class="comment">// After reconnect, check if we were in a game</span>
+    <span class="keyword">string</span> savedGameId = PlayerPrefs.GetString(<span class="string">"activeGameId"</span>, <span class="string">""</span>);
+    <span class="keyword">if</span> (!<span class="keyword">string</span>.IsNullOrEmpty(savedGameId))
+    {
+        socket.Emit(<span class="string">"game:reconnect"</span>, <span class="keyword">new</span> { gameId = savedGameId });
+    }
+}
+
+<span class="comment">// When game starts, persist gameId</span>
+PlayerPrefs.SetString(<span class="string">"activeGameId"</span>, gameId);
+PlayerPrefs.Save();
+
+<span class="comment">// When game ends, clear it</span>
+PlayerPrefs.DeleteKey(<span class="string">"activeGameId"</span>);</pre>
+
+  <!-- ─── SECTION 10 ─── -->
+  <div class="section-header">
+    <div class="section-num">10</div>
+    <h2>Error Handling</h2>
+  </div>
+
+  <h3>WebSocket Errors (event: <code>error</code>)</h3>
+  <table>
+    <thead><tr><th>Code</th><th>Meaning</th><th>What to do</th></tr></thead>
+    <tbody>
+      <tr><td><code>AUTH_FAILED</code></td><td>Token missing or expired</td><td>Navigate to login screen</td></tr>
+      <tr><td><code>INVALID_PAYLOAD</code></td><td>Missing required field</td><td>Fix emit payload</td></tr>
+      <tr><td><code>ROOM_JOIN_FAILED</code></td><td>Room not found or error</td><td>Show error to user</td></tr>
+      <tr><td><code>GAME_START_FAILED</code></td><td>Error starting game</td><td>Retry or return to lobby</td></tr>
+      <tr><td><code>CHAT_ERROR</code></td><td>Message send failed</td><td>Show "message failed" UI</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Game Move Errors (event: <code>game:move_invalid</code>)</h3>
+  <table>
+    <thead><tr><th>Reason</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td><code>NOT_YOUR_TURN</code></td><td>You emitted a move when it's the opponent's turn</td></tr>
+      <tr><td><code>GAME_NOT_IN_PROGRESS</code></td><td>Game already ended or not started</td></tr>
+      <tr><td><code>No cards left to draw</code></td><td>Stock and discard both exhausted</td></tr>
+      <tr><td><code>Cannot pick up discard pile</code></td><td>Top card cannot form a meld with hand cards</td></tr>
+      <tr><td><code>A meld must have at least 3 cards</code></td><td>Tried to meld fewer than 3 cards</td></tr>
+      <tr><td><code>A meld can contain at most one wild card</code></td><td>Tried to use 2+ wilds in one meld</td></tr>
+      <tr><td><code>Your team must have at least one Buraco to close</code></td><td>No 7+ card meld yet</td></tr>
+      <tr><td><code>Your team must collect the pot before closing</code></td><td>Team never picked up the pot</td></tr>
+      <tr><td><code>Cannot close by discarding a wild card</code></td><td>CLASSIC: Joker/Pinella cannot be the closing discard</td></tr>
+      <tr><td><code>Your team has already collected their pot</code></td><td>Tried to pick up pot a second time</td></tr>
+      <tr><td><code>Must have Buraco before collecting pot (Professional)</code></td><td>Professional mode: form Buraco first</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout green">
+    <strong>✅ Always listen for game:move_invalid</strong>
+    Every move the client emits might come back as invalid. Show the <code>reason</code> string to the player as a toast or inline message. Never assume a move succeeded — wait for <code>game:move_played</code>.
+  </div>
+
+  <div class="footer">
+    Buraco Plus — Unity Socket.io Integration Guide &nbsp;·&nbsp; Backend: NestJS + Socket.io &nbsp;·&nbsp; 2026-05-13
+  </div>
+
+</div>
+</body>
+</html>
