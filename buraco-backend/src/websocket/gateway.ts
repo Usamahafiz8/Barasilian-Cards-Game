@@ -99,41 +99,54 @@ export class AppGateway implements OnGatewayConnection, OnGatewayDisconnect {
   }
 
   @SubscribeMessage('room:join')
-  async handleRoomJoin(@ConnectedSocket() socket: Socket, @MessageBody() data: { roomId: string }) {
-    socket.join(`room:${data.roomId}`);
-    socket.emit('room:joined_ack', { roomId: data.roomId });
+  async handleRoomJoin(@ConnectedSocket() socket: Socket, @MessageBody() data: { roomId: string } | string) {
+    // Unity sends roomId as a plain string; web clients may send { roomId }
+    const roomId = typeof data === 'string' ? data : data?.roomId;
 
-    const room = await this.roomsService.getRoom(data.roomId);
-    if (room.status !== RoomStatus.FULL) return;
+    if (!roomId) {
+      socket.emit('error', { code: 'INVALID_PAYLOAD', message: 'roomId is required' });
+      return;
+    }
 
-    // Only one socket wins the lock to avoid double-starting the game
-    const lockKey = `game:starting:${data.roomId}`;
-    const locked = await this.redis.setNx(lockKey, '1', 30);
-    if (!locked) return;
+    socket.join(`room:${roomId}`);
+    socket.emit('room:joined_ack', { roomId });
 
     try {
-      const connectedSockets = await this.server.in(`room:${data.roomId}`).fetchSockets();
-      const playerIds = connectedSockets.map((s) => s.data.userId as string).filter(Boolean);
+      const room = await this.roomsService.getRoom(roomId);
+      if (room.status !== RoomStatus.FULL) return;
 
-      if (playerIds.length < room.maxPlayers) {
+      // Only one socket wins the lock to avoid double-starting the game
+      const lockKey = `game:starting:${roomId}`;
+      const locked = await this.redis.setNx(lockKey, '1', 30);
+      if (!locked) return;
+
+      try {
+        const connectedSockets = await this.server.in(`room:${roomId}`).fetchSockets();
+        const playerIds = connectedSockets.map((s) => s.data.userId as string).filter(Boolean);
+
+        if (playerIds.length < room.maxPlayers) {
+          await this.redis.del(lockKey);
+          this.logger.warn(`Room ${roomId} is FULL but only ${playerIds.length}/${room.maxPlayers} sockets connected`);
+          return;
+        }
+
+        const gameState = await this.gameEngine.startGame(roomId, room.mode, room.variant, playerIds);
+        await this.roomsService.transitionToInProgress(roomId, gameState.gameId);
+
+        this.server.to(`room:${roomId}`).emit('room:update', {
+          roomId,
+          gameId: gameState.gameId,
+          status: 'IN_PROGRESS',
+        });
+        this.logger.log(`Game ${gameState.gameId} started for room ${roomId}`);
+      } catch (err) {
         await this.redis.del(lockKey);
-        this.logger.warn(`Room ${data.roomId} is FULL but only ${playerIds.length}/${room.maxPlayers} sockets connected`);
-        return;
+        this.logger.error(`Failed to start game for room ${roomId}`, err);
+        socket.emit('error', { code: 'GAME_START_FAILED', message: (err as Error).message });
       }
-
-      const gameState = await this.gameEngine.startGame(data.roomId, room.mode, room.variant, playerIds);
-      await this.roomsService.transitionToInProgress(data.roomId, gameState.gameId);
-
-      this.server.to(`room:${data.roomId}`).emit('room:update', {
-        roomId: data.roomId,
-        gameId: gameState.gameId,
-        status: 'IN_PROGRESS',
-      });
-      this.logger.log(`Game ${gameState.gameId} started for room ${data.roomId}`);
     } catch (err) {
-      await this.redis.del(lockKey);
-      this.logger.error(`Failed to start game for room ${data.roomId}`, err);
-      socket.emit('error', { code: 'GAME_START_FAILED', message: err.message });
+      this.logger.error(`room:join failed for room ${roomId}`, err);
+      socket.emit('error', { code: 'ROOM_JOIN_FAILED', message: (err as Error).message });
     }
   }
 
