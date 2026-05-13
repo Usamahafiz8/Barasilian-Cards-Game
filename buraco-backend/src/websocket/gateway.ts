@@ -3,6 +3,7 @@ import {
   MessageBody,
   OnGatewayConnection,
   OnGatewayDisconnect,
+  OnGatewayInit,
   SubscribeMessage,
   WebSocketGateway,
   WebSocketServer,
@@ -12,16 +13,16 @@ import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { GameEngineService } from '../modules/game-engine/game-engine.service';
 import { MessagingService } from '../modules/messaging/messaging.service';
-import { NotificationsService } from '../modules/notifications/notifications.service';
 import { RedisService } from '../common/redis/redis.service';
 import { ReconnectionService } from '../modules/reconnection/reconnection.service';
 import { RoomsService } from '../modules/rooms/rooms.service';
+import { SocketService } from '../common/socket/socket.service';
 import { MoveType, RoomStatus } from '@prisma/client';
 import { Logger } from '@nestjs/common';
 
 @WebSocketGateway({ cors: { origin: '*' }, namespace: '/' })
-export class AppGateway implements OnGatewayConnection, OnGatewayDisconnect {
-  @WebSocketServer() server: Server;
+export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect {
+  @WebSocketServer() server!: Server;
   private readonly logger = new Logger(AppGateway.name);
 
   // Map userId → socketId for presence
@@ -32,11 +33,16 @@ export class AppGateway implements OnGatewayConnection, OnGatewayDisconnect {
     private config: ConfigService,
     private gameEngine: GameEngineService,
     private messaging: MessagingService,
-    private notifications: NotificationsService,
     private redis: RedisService,
     private reconnection: ReconnectionService,
     private roomsService: RoomsService,
+    private socketService: SocketService,
   ) {}
+
+  afterInit(server: Server) {
+    this.socketService.setServer(server);
+    this.logger.log('WebSocket gateway initialized');
+  }
 
   // ─── Connection ───────────────────────────────────────────────────────────
 
@@ -206,7 +212,7 @@ export class AppGateway implements OnGatewayConnection, OnGatewayDisconnect {
         this.server.to(`game:${data.gameId}`).emit('game:move_played', { gameId: data.gameId, playerId: userId, moveType: type, result: result.result, nextTurnPlayerId: result.nextTurnPlayerId, turnTimeLimit: 30 });
       }
     } catch (err) {
-      socket.emit('game:move_invalid', { gameId: data.gameId, reason: err.message });
+      socket.emit('game:move_invalid', { gameId: data.gameId, reason: (err as Error).message });
     }
   }
 
@@ -224,7 +230,7 @@ export class AppGateway implements OnGatewayConnection, OnGatewayDisconnect {
         this.server.to(`game:${data.gameId}`).emit('game:move_played', { gameId: data.gameId, playerId: userId, moveType: MoveType.DISCARD, result: result.result, nextTurnPlayerId: result.nextTurnPlayerId, turnTimeLimit: 30 });
       }
     } catch (err) {
-      socket.emit('game:move_invalid', { gameId: data.gameId, reason: err.message });
+      socket.emit('game:move_invalid', { gameId: data.gameId, reason: (err as Error).message });
     }
   }
 
@@ -237,7 +243,7 @@ export class AppGateway implements OnGatewayConnection, OnGatewayDisconnect {
         this.server.to(`game:${data.gameId}`).emit('game:move_played', { gameId: data.gameId, playerId: userId, moveType: MoveType.PLAY_MELD, result: result.result });
       }
     } catch (err) {
-      socket.emit('game:move_invalid', { gameId: data.gameId, reason: err.message });
+      socket.emit('game:move_invalid', { gameId: data.gameId, reason: (err as Error).message });
     }
   }
 
@@ -250,7 +256,7 @@ export class AppGateway implements OnGatewayConnection, OnGatewayDisconnect {
       const message = await this.messaging.sendMessage(data.conversationId, userId, data.content);
       this.server.to(`conv:${data.conversationId}`).emit('chat:message', message);
     } catch (err) {
-      socket.emit('error', { code: 'CHAT_ERROR', message: err.message });
+      socket.emit('error', { code: 'CHAT_ERROR', message: (err as Error).message });
     }
   }
 

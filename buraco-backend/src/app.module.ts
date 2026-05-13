@@ -7,6 +7,8 @@ import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import configuration from './config/configuration';
 import { PrismaModule } from './common/prisma/prisma.module';
 import { RedisModule } from './common/redis/redis.module';
+import { S3Module } from './common/s3/s3.module';
+import { SocketModule } from './common/socket/socket.module';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 import { TransformInterceptor } from './common/interceptors/transform.interceptor';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
@@ -40,6 +42,8 @@ import { AppGateway } from './websocket/gateway';
     ScheduleModule.forRoot(),
     PrismaModule,
     RedisModule,
+    S3Module,
+    SocketModule,
     AuthModule,
     UsersModule,
     ProfileModule,
