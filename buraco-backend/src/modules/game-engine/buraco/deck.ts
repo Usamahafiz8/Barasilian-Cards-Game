@@ -22,18 +22,19 @@ function makeCard(suit: Suit | 'JOKER', rank: Rank): Card {
   };
 }
 
-export function generateDeck(): Card[] {
+// CLASSIC: 2 decks + jokers = 108 cards. PROFESSIONAL: 2 decks, no jokers = 104 cards.
+export function generateDeck(includeJokers: boolean = true): Card[] {
   const deck: Card[] = [];
-  // Two full decks
   for (let d = 0; d < 2; d++) {
     for (const suit of SUITS) {
       for (const rank of RANKS) {
         deck.push(makeCard(suit, rank));
       }
     }
-    // 2 jokers per deck
-    deck.push(makeCard('JOKER', 'JOKER'));
-    deck.push(makeCard('JOKER', 'JOKER'));
+    if (includeJokers) {
+      deck.push(makeCard('JOKER', 'JOKER'));
+      deck.push(makeCard('JOKER', 'JOKER'));
+    }
   }
   return deck;
 }
@@ -47,12 +48,13 @@ export function shuffle<T>(deck: T[]): T[] {
   return arr;
 }
 
-export function cardValue(card: Card): number {
-  if (card.rank === 'JOKER') return 50;
+// isProfessional: 2 is worth 10 (same as face cards); CLASSIC: 2 (Pinella) = 20, Joker = 30
+export function cardValue(card: Card, isProfessional = false): number {
+  if (card.rank === 'JOKER') return 30;
   if (card.rank === 'A') return 15;
-  if (['J', 'Q', 'K'].includes(card.rank)) return 10;
-  if (card.rank === '2') return 20;
-  return parseInt(card.rank);
+  if (card.rank === '2') return isProfessional ? 10 : 20;
+  if (['J', 'Q', 'K', '8', '9', '10'].includes(card.rank)) return 10;
+  return 5; // 3–7
 }
 
 export function rankOrder(rank: Rank): number {

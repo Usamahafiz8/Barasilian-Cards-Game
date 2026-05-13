@@ -7,7 +7,7 @@ import { RedisService } from '../../common/redis/redis.service';
 import { EconomyService } from '../economy/economy.service';
 import { StatsService } from '../stats/stats.service';
 import { generateDeck, shuffle, Card } from './buraco/deck';
-import { validateMeld, canAddToMeld, canPickupDiscardPile, canPickupPot, Meld } from './buraco/rules';
+import { validateMeld, canAddToMeld, canPickupDiscardPile, canPickupPot, hasBuraco, Meld } from './buraco/rules';
 import { calculateScore, calculateMatchReward } from './buraco/scoring';
 
 export interface GameState {
@@ -30,6 +30,7 @@ export interface GameState {
   round: number;
   scores: Record<number, number>;        // teamId → score
   moveCount: number;
+  potCollectedByTeam: number[];          // teamIds that have picked up their pot
 }
 
 @Injectable()
@@ -88,7 +89,8 @@ export class GameEngineService {
     const dbPlayers = game.players;
     const dbUserIds = dbPlayers.map((p) => p.userId);
 
-    const deck = shuffle(generateDeck());
+    // CLASSIC: 2 decks + jokers = 108 cards. PROFESSIONAL: 2 decks, no jokers = 104 cards.
+    const deck = shuffle(generateDeck(mode !== GameMode.PROFESSIONAL));
     const hands: Record<string, Card[]> = {};
     const potPiles: Card[][] = [[], []];
 
@@ -99,7 +101,7 @@ export class GameEngineService {
       deckIdx += 11;
     }
 
-    // Create 2 pot piles of 11 cards each
+    // Two pots of 11 cards each (both modes)
     potPiles[0] = deck.slice(deckIdx, deckIdx + 11);
     deckIdx += 11;
     potPiles[1] = deck.slice(deckIdx, deckIdx + 11);
@@ -134,6 +136,7 @@ export class GameEngineService {
       round: 1,
       scores: { 1: 0, 2: 0 },
       moveCount: 0,
+      potCollectedByTeam: [],
     };
 
     await this.redis.setJson(this.stateKey(game.id), state, 86400);
@@ -197,6 +200,7 @@ export class GameEngineService {
       round: state.round,
       scores: state.scores,
       moveCount: state.moveCount,
+      potCollectedByTeam: state.potCollectedByTeam ?? [],
     };
   }
 
@@ -223,6 +227,12 @@ export class GameEngineService {
         const card = state.stockPile.pop()!;
         hand.push(card);
         result = { card, handCount: hand.length, stockPileCount: state.stockPile.length };
+
+        // Spec: game ends when only 2 cards remain in the deck
+        if (state.stockPile.length < 2) {
+          await this.redis.setJson(this.stateKey(gameId), state, 86400);
+          return this.finalizeGame(gameId, state);
+        }
         break;
       }
 
@@ -266,13 +276,37 @@ export class GameEngineService {
         const idx = hand.findIndex((c) => c.id === cardId);
         if (idx === -1) throw new BadRequestException('Card not in hand');
         const [card] = hand.splice(idx, 1);
+
+        const wouldClose = hand.length === 0 && state.potPiles.every((p) => p.length === 0);
+        if (wouldClose) {
+          // CLASSIC: cannot close by discarding a wild card
+          if (state.mode === GameMode.CLASSIC && card.isWild) {
+            hand.push(card);
+            throw new BadRequestException('Cannot close the game by discarding a wild card (Joker or Pinella)');
+          }
+
+          const playerTeamId = state.players.find((p) => p.userId === playerId)?.teamId ?? 1;
+
+          // Must have at least one Buraco on the team (either player in 2v2)
+          const teamPlayerIds = state.players.filter((p) => p.teamId === playerTeamId).map((p) => p.userId);
+          const teamHasBuraco = teamPlayerIds.some((uid) => hasBuraco(state.melds[uid] || []));
+          if (!teamHasBuraco) {
+            hand.push(card);
+            throw new BadRequestException('Your team must have at least one Buraco (7+ cards) to close the game');
+          }
+
+          // Team must have collected their pot
+          if (!(state.potCollectedByTeam ?? []).includes(playerTeamId)) {
+            hand.push(card);
+            throw new BadRequestException('Your team must collect the pot before closing the game');
+          }
+
+          state.discardPile.push(card);
+          return this.finalizeGame(gameId, state, playerTeamId);
+        }
+
         state.discardPile.push(card);
         result = { discardedCard: card, handCount: hand.length };
-
-        // Check game end: hand is empty after discard
-        if (hand.length === 0 && state.potPiles.every((p) => p.length === 0)) {
-          return this.finalizeGame(gameId, state);
-        }
 
         // Advance turn after discard
         state.currentTurnIndex = (state.currentTurnIndex + 1) % state.turnOrder.length;
@@ -282,10 +316,31 @@ export class GameEngineService {
 
       case MoveType.PICKUP_POT: {
         if (!canPickupPot(hand)) throw new BadRequestException('Hand must be empty to pick up pot');
+
+        const playerTeamId = state.players.find((p) => p.userId === playerId)?.teamId ?? 1;
+
+        // Each team can only collect one pot per game
+        if ((state.potCollectedByTeam ?? []).includes(playerTeamId)) {
+          throw new BadRequestException('Your team has already collected their pot this game');
+        }
+
+        // PROFESSIONAL: must have at least one Buraco before taking the pot
+        if (state.mode === GameMode.PROFESSIONAL) {
+          const teamPlayerIds = state.players.filter((p) => p.teamId === playerTeamId).map((p) => p.userId);
+          const teamHasBuraco = teamPlayerIds.some((uid) => hasBuraco(state.melds[uid] || []));
+          if (!teamHasBuraco) {
+            throw new BadRequestException('Your team must have at least one Buraco before collecting the pot (Professional mode)');
+          }
+        }
+
         const pot = state.potPiles.find((p) => p.length > 0);
         if (!pot) throw new BadRequestException('No pot available');
         hand.push(...pot.splice(0, pot.length));
-        result = { handCount: hand.length };
+
+        if (!state.potCollectedByTeam) state.potCollectedByTeam = [];
+        state.potCollectedByTeam.push(playerTeamId);
+
+        result = { handCount: hand.length, potCollectedByTeam: state.potCollectedByTeam };
         break;
       }
     }
@@ -305,15 +360,28 @@ export class GameEngineService {
     };
   }
 
-  async finalizeGame(gameId: string, state?: GameState) {
+  async finalizeGame(gameId: string, state?: GameState, closerTeamId?: number) {
     if (!state) state = (await this.redis.getJson<GameState>(this.stateKey(gameId))) ?? undefined;
     if (!state) throw new NotFoundException('Game not found');
 
-    // Calculate scores
+    // Calculate base scores from melds and hand penalties
     const teamScores: Record<number, number> = { 1: 0, 2: 0 };
     for (const player of state.players) {
-      const score = calculateScore(state.melds[player.userId] || [], state.hands[player.userId] || []);
+      const score = calculateScore(state.melds[player.userId] || [], state.hands[player.userId] || [], state.mode);
       teamScores[player.teamId] = (teamScores[player.teamId] || 0) + score;
+    }
+
+    // +100 closing bonus for the team that closed the game
+    if (closerTeamId !== undefined) {
+      teamScores[closerTeamId] = (teamScores[closerTeamId] || 0) + 100;
+    }
+
+    // -100 pot penalty for every team that never collected their pot
+    const collectedTeams = state.potCollectedByTeam ?? [];
+    for (const teamId of [1, 2]) {
+      if (!collectedTeams.includes(teamId)) {
+        teamScores[teamId] = (teamScores[teamId] || 0) - 100;
+      }
     }
 
     const winnerTeam = teamScores[1] > teamScores[2] ? 1 : 2;

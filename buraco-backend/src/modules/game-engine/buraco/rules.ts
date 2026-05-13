@@ -14,7 +14,7 @@ export function validateMeld(cards: Card[]): { valid: boolean; reason?: string }
   const wilds = cards.filter((c) => c.isWild);
 
   if (naturals.length === 0) return { valid: false, reason: 'A meld must have at least one natural card' };
-  if (wilds.length > naturals.length) return { valid: false, reason: 'Cannot have more wilds than natural cards' };
+  if (wilds.length > 1) return { valid: false, reason: 'A meld can contain at most one wild card' };
 
   // Check if it's a SET (same rank)
   if (isValidSet(naturals)) return { valid: true };
@@ -78,4 +78,8 @@ export function canPickupDiscardPile(topCard: Card, hand: Card[]): boolean {
 
 export function canPickupPot(hand: Card[]): boolean {
   return hand.length === 0;
+}
+
+export function hasBuraco(melds: Meld[]): boolean {
+  return melds.some((m) => m.cards.length >= 7);
 }
