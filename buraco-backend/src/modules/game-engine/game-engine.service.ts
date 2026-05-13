@@ -135,15 +135,56 @@ export class GameEngineService {
     return state;
   }
 
-  async getGameState(gameId: string, requestingUserId: string): Promise<GameState & { myHand: Card[]; myMelds: Meld[] }> {
+  async getGameState(gameId: string, requestingUserId: string) {
     const state = await this.redis.getJson<GameState>(this.stateKey(gameId));
     if (!state) throw new NotFoundException('Game state not found');
+    return this.buildClientView(state, requestingUserId);
+  }
+
+  /**
+   * Builds the player-specific view of game state sent to clients.
+   * - Adds convenience fields the Unity client needs directly (currentPlayerId,
+   *   stockPileCount, topDiscardCard, id alias on each player, hand per player)
+   * - Masks opponent hands so only card count is visible
+   * - Returned by both getGameState and processMove so shapes are identical
+   */
+  private buildClientView(state: GameState, requestingUserId: string) {
+    const currentPlayerId = state.turnOrder[state.currentTurnIndex] ?? '';
+    const topDiscardCard = state.discardPile.length > 0
+      ? state.discardPile[state.discardPile.length - 1]
+      : null;
+
+    const players = state.players.map((p) => ({
+      id: p.userId,          // alias expected by Unity client
+      userId: p.userId,
+      teamId: p.teamId,
+      isConnected: p.isConnected,
+      handCount: (state.hands[p.userId] || []).length,
+      hand: p.userId === requestingUserId ? (state.hands[p.userId] || []) : [],
+      melds: state.melds[p.userId] || [],
+    }));
 
     return {
-      ...state,
+      gameId: state.gameId,
+      mode: state.mode,
+      variant: state.variant,
+      status: state.status,
+      currentPlayerId,
+      stockPileCount: state.stockPile.length,
+      topDiscardCard,
+      discardPileCount: state.discardPile.length,
+      potPileCounts: state.potPiles.map((p) => p.length),
+      players,
       myHand: state.hands[requestingUserId] || [],
       myMelds: state.melds[requestingUserId] || [],
-      hands: Object.fromEntries(Object.entries(state.hands).map(([uid, cards]) => [uid, uid === requestingUserId ? cards : cards.map(() => ({ id: '?', rank: '?', suit: '?', isWild: false } as any))])),
+      teamMelds: state.teamMelds,
+      turnOrder: state.turnOrder,
+      currentTurnIndex: state.currentTurnIndex,
+      turnStartedAt: state.turnStartedAt,
+      turnDuration: state.turnDuration,
+      round: state.round,
+      scores: state.scores,
+      moveCount: state.moveCount,
     };
   }
 
@@ -245,7 +286,11 @@ export class GameEngineService {
       data: { gameId, playerId, turnNumber: state.moveCount, moveType: move.type, cardData: result, isValid: true },
     });
 
-    return { state, result, nextTurnPlayerId: state.turnOrder[state.currentTurnIndex] };
+    return {
+      state: this.buildClientView(state, playerId),
+      result,
+      nextTurnPlayerId: state.turnOrder[state.currentTurnIndex],
+    };
   }
 
   async finalizeGame(gameId: string, state?: GameState) {
