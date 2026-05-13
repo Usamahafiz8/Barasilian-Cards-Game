@@ -84,13 +84,17 @@ export class GameEngineService {
       include: { players: true },
     });
 
+    // Use DB-returned players as the single source of truth for all per-player structures
+    const dbPlayers = game.players;
+    const dbUserIds = dbPlayers.map((p) => p.userId);
+
     const deck = shuffle(generateDeck());
     const hands: Record<string, Card[]> = {};
     const potPiles: Card[][] = [[], []];
 
     // Deal 11 cards to each player
     let deckIdx = 0;
-    for (const player of game.players) {
+    for (const player of dbPlayers) {
       hands[player.userId] = deck.slice(deckIdx, deckIdx + 11);
       deckIdx += 11;
     }
@@ -105,8 +109,9 @@ export class GameEngineService {
     const topCard = stockPile.pop();
     const discardPile: Card[] = topCard ? [topCard] : [];
 
-    const turnOrder = shuffle([...playerIds]);
-    const players = game.players.map((p) => ({ userId: p.userId, teamId: p.teamId, isConnected: true }));
+    // Turn order and all per-player maps derived from the same dbUserIds
+    const turnOrder = shuffle([...dbUserIds]);
+    const players = dbPlayers.map((p) => ({ userId: p.userId, teamId: p.teamId, isConnected: true }));
     const now = Date.now();
 
     const state: GameState = {
@@ -118,7 +123,7 @@ export class GameEngineService {
       discardPile,
       potPiles,
       hands,
-      melds: Object.fromEntries(playerIds.map((id) => [id, []])),
+      melds: Object.fromEntries(dbUserIds.map((id) => [id, []])),
       teamMelds: { 1: [], 2: [] },
       players,
       turnOrder,
