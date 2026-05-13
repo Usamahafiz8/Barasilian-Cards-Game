@@ -154,7 +154,14 @@ export class GameEngineService {
       ? state.discardPile[state.discardPile.length - 1]
       : null;
 
-    const players = state.players.map((p) => ({
+    // Local player always first so clients can safely use players[0] as themselves
+    const sortedPlayers = [...state.players].sort((a, b) => {
+      if (a.userId === requestingUserId) return -1;
+      if (b.userId === requestingUserId) return 1;
+      return 0;
+    });
+
+    const players = sortedPlayers.map((p) => ({
       id: p.userId,          // alias expected by Unity client
       userId: p.userId,
       teamId: p.teamId,
