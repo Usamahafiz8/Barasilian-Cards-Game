@@ -42,16 +42,11 @@ export class RoomsService {
     if (!room) throw new NotFoundException('Room not found');
     if (room.status === RoomStatus.FULL || room.status === RoomStatus.IN_PROGRESS) throw new BadRequestException('ROOM_FULL');
 
-    // Level check
-    if (room.minLevel) {
+    // Level / points check — single query covers both
+    if (room.minLevel || room.minPoints) {
       const stats = await this.prisma.playerStats.findUnique({ where: { userId } });
-      if (stats && stats.level < room.minLevel) throw new ForbiddenException('LEVEL_REQUIREMENT_NOT_MET');
-    }
-
-    // Points check
-    if (room.minPoints) {
-      const stats = await this.prisma.playerStats.findUnique({ where: { userId } });
-      if (stats && stats.points < room.minPoints) throw new ForbiddenException('POINTS_REQUIREMENT_NOT_MET');
+      if (stats && room.minLevel && stats.level < room.minLevel) throw new ForbiddenException('LEVEL_REQUIREMENT_NOT_MET');
+      if (stats && room.minPoints && stats.points < room.minPoints) throw new ForbiddenException('POINTS_REQUIREMENT_NOT_MET');
     }
 
     if (room.entryFeeCoins > 0) {
@@ -59,11 +54,7 @@ export class RoomsService {
     }
 
     const newCount = room.currentPlayers + 1;
-    const newStatus = newCount >= room.maxPlayers
-      ? RoomStatus.FULL
-      : newCount >= 2
-        ? RoomStatus.WAITING
-        : RoomStatus.WAITING;
+    const newStatus = newCount >= room.maxPlayers ? RoomStatus.FULL : RoomStatus.WAITING;
 
     return this.prisma.room.update({
       where: { id: roomId },

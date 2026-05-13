@@ -30,16 +30,16 @@ export class ReconnectionService {
 
   /** Get the active game ID for a user (set when the game starts) */
   async getActiveGameForUser(userId: string): Promise<string | null> {
-    return this.redis.get(`active_game:${userId}`);
+    return this.redis.get(`user:${userId}:activeGame`);
   }
 
   /** Persist the active game for a user with a 24h TTL */
   async setActiveGame(userId: string, gameId: string): Promise<void> {
-    await this.redis.set(`active_game:${userId}`, gameId, ACTIVE_GAME_TTL);
+    await this.redis.set(`user:${userId}:activeGame`, gameId, ACTIVE_GAME_TTL);
   }
 
   /** Remove the active game record for a user */
   async clearActiveGame(userId: string): Promise<void> {
-    await this.redis.del(`active_game:${userId}`);
+    await this.redis.del(`user:${userId}:activeGame`);
   }
 }

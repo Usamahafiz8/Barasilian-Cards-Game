@@ -24,6 +24,7 @@ export interface GameState {
   players: Array<{ userId: string; teamId: number; isConnected: boolean }>;
   turnOrder: string[];
   currentTurnIndex: number;
+  gameStartedAt: number;
   turnStartedAt: number;
   turnDuration: number;
   round: number;
@@ -104,8 +105,9 @@ export class GameEngineService {
     const topCard = stockPile.pop();
     const discardPile: Card[] = topCard ? [topCard] : [];
 
-    const turnOrder = playerIds; // randomize in production
+    const turnOrder = shuffle([...playerIds]);
     const players = game.players.map((p) => ({ userId: p.userId, teamId: p.teamId, isConnected: true }));
+    const now = Date.now();
 
     const state: GameState = {
       gameId: game.id,
@@ -121,7 +123,8 @@ export class GameEngineService {
       players,
       turnOrder,
       currentTurnIndex: 0,
-      turnStartedAt: Date.now(),
+      gameStartedAt: now,
+      turnStartedAt: now,
       turnDuration: 30,
       round: 1,
       scores: { 1: 0, 2: 0 },
@@ -157,8 +160,14 @@ export class GameEngineService {
 
     switch (move.type) {
       case MoveType.DRAW_STOCK: {
-        const card = state.stockPile.pop();
-        if (!card) throw new BadRequestException('Stock pile is empty');
+        if (state.stockPile.length === 0) {
+          // Reshuffle discard pile into stock, keeping the top card
+          if (state.discardPile.length <= 1) throw new BadRequestException('No cards left to draw');
+          const top = state.discardPile.pop()!;
+          state.stockPile = shuffle(state.discardPile);
+          state.discardPile = [top];
+        }
+        const card = state.stockPile.pop()!;
         hand.push(card);
         result = { card, handCount: hand.length, stockPileCount: state.stockPile.length };
         break;
@@ -250,9 +259,9 @@ export class GameEngineService {
       teamScores[player.teamId] = (teamScores[player.teamId] || 0) + score;
     }
 
-    const winnerTeam = teamScores[1] >= teamScores[2] ? 1 : 2;
+    const winnerTeam = teamScores[1] > teamScores[2] ? 1 : 2;
     const winnerIds = state.players.filter((p) => p.teamId === winnerTeam).map((p) => p.userId);
-    const duration = Math.floor((Date.now() - state.turnStartedAt) / 1000);
+    const duration = Math.floor((Date.now() - state.gameStartedAt) / 1000);
 
     // Persist result
     await this.prisma.$transaction(async (tx) => {

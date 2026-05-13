@@ -106,21 +106,37 @@ export class EconomyService {
   }
 
   async sendGift(senderId: string, receiverId: string, currency: CurrencyType, amount: number) {
-    const receiver = await this.prisma.user.findUnique({ where: { id: receiverId, isDeleted: false } });
+    const [receiver, blocked] = await Promise.all([
+      this.prisma.user.findUnique({ where: { id: receiverId, isDeleted: false } }),
+      this.prisma.block.findFirst({
+        where: { OR: [{ blockerId: senderId, blockedId: receiverId }, { blockerId: receiverId, blockedId: senderId }] },
+      }),
+    ]);
     if (!receiver) throw new NotFoundException('USER_NOT_FOUND');
-
-    const blocked = await this.prisma.block.findFirst({
-      where: { OR: [{ blockerId: senderId, blockedId: receiverId }, { blockerId: receiverId, blockedId: senderId }] },
-    });
     if (blocked) throw new ForbiddenException('USER_BLOCKED');
 
-    await this.prisma.$transaction(async () => {
+    // Single transaction — avoids nested Prisma transactions which are unsupported
+    await this.prisma.$transaction(async (tx) => {
       if (currency === CurrencyType.COINS) {
-        await this.deductCoins(senderId, amount, TransactionType.GIFT_SENT, receiverId, `Gift to ${receiverId}`);
-        await this.addCoins(receiverId, amount, TransactionType.GIFT_RECEIVED, senderId, `Gift from ${senderId}`);
+        const sender = await tx.user.findUnique({ where: { id: senderId }, select: { coins: true } });
+        if (!sender) throw new NotFoundException('User not found');
+        if (sender.coins < amount) throw new BadRequestException('INSUFFICIENT_BALANCE');
+
+        const updatedSender = await tx.user.update({ where: { id: senderId }, data: { coins: { decrement: amount } } });
+        await tx.transaction.create({ data: { userId: senderId, type: TransactionType.GIFT_SENT, currency, amount: -amount, balanceBefore: sender.coins, balanceAfter: updatedSender.coins, referenceId: receiverId, description: `Gift to ${receiverId}` } });
+
+        const updatedReceiver = await tx.user.update({ where: { id: receiverId }, data: { coins: { increment: amount } } });
+        await tx.transaction.create({ data: { userId: receiverId, type: TransactionType.GIFT_RECEIVED, currency, amount, balanceBefore: receiver.coins, balanceAfter: updatedReceiver.coins, referenceId: senderId, description: `Gift from ${senderId}` } });
       } else {
-        await this.deductDiamonds(senderId, amount, TransactionType.GIFT_SENT, receiverId, `Gift to ${receiverId}`);
-        await this.addDiamonds(receiverId, amount, TransactionType.GIFT_RECEIVED, senderId, `Gift from ${senderId}`);
+        const sender = await tx.user.findUnique({ where: { id: senderId }, select: { diamonds: true } });
+        if (!sender) throw new NotFoundException('User not found');
+        if (sender.diamonds < amount) throw new BadRequestException('INSUFFICIENT_BALANCE');
+
+        const updatedSender = await tx.user.update({ where: { id: senderId }, data: { diamonds: { decrement: amount } } });
+        await tx.transaction.create({ data: { userId: senderId, type: TransactionType.GIFT_SENT, currency, amount: -amount, balanceBefore: sender.diamonds, balanceAfter: updatedSender.diamonds, referenceId: receiverId, description: `Gift to ${receiverId}` } });
+
+        const updatedReceiver = await tx.user.update({ where: { id: receiverId }, data: { diamonds: { increment: amount } } });
+        await tx.transaction.create({ data: { userId: receiverId, type: TransactionType.GIFT_RECEIVED, currency, amount, balanceBefore: receiver.diamonds, balanceAfter: updatedReceiver.diamonds, referenceId: senderId, description: `Gift from ${senderId}` } });
       }
     });
   }

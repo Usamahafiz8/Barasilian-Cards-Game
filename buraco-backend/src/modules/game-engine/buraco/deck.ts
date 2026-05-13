@@ -1,3 +1,5 @@
+import { v4 as uuidv4 } from 'uuid';
+
 export type Suit = 'HEARTS' | 'DIAMONDS' | 'CLUBS' | 'SPADES';
 export type Rank = 'A' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' | '10' | 'J' | 'Q' | 'K' | 'JOKER';
 
@@ -11,12 +13,9 @@ export interface Card {
 const SUITS: Suit[] = ['HEARTS', 'DIAMONDS', 'CLUBS', 'SPADES'];
 const RANKS: Rank[] = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K'];
 
-let cardCounter = 0;
-
 function makeCard(suit: Suit | 'JOKER', rank: Rank): Card {
-  cardCounter++;
   return {
-    id: `c${cardCounter}_${suit}_${rank}`,
+    id: uuidv4(),
     suit,
     rank,
     isWild: rank === 'JOKER' || rank === '2',
@@ -39,7 +38,7 @@ export function generateDeck(): Card[] {
   return deck;
 }
 
-export function shuffle(deck: Card[]): Card[] {
+export function shuffle<T>(deck: T[]): T[] {
   const arr = [...deck];
   for (let i = arr.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
