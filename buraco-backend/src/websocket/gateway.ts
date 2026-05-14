@@ -261,6 +261,28 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
     }
   }
 
+  @SubscribeMessage('game:move:add_to_meld')
+  async handleAddToMeld(@ConnectedSocket() socket: Socket, @MessageBody() data: { gameId: string; meldId: string; cardIds: string[] }) {
+    const userId = socket.data.userId;
+    try {
+      await this.gameEngine.processMove(data.gameId, userId, { type: MoveType.ADD_TO_MELD, meldId: data.meldId, cardIds: data.cardIds });
+      await this.broadcastGameState(data.gameId, { type: 'ADD_TO_MELD', playerId: userId, meldId: data.meldId, cardIds: data.cardIds });
+    } catch (err) {
+      socket.emit('game:move_invalid', { gameId: data.gameId, reason: (err as Error).message });
+    }
+  }
+
+  @SubscribeMessage('game:move:pickup_pot')
+  async handlePickupPot(@ConnectedSocket() socket: Socket, @MessageBody() data: { gameId: string }) {
+    const userId = socket.data.userId;
+    try {
+      await this.gameEngine.processMove(data.gameId, userId, { type: MoveType.PICKUP_POT });
+      await this.broadcastGameState(data.gameId, { type: 'PICKUP_POT', playerId: userId });
+    } catch (err) {
+      socket.emit('game:move_invalid', { gameId: data.gameId, reason: (err as Error).message });
+    }
+  }
+
   // ─── Chat ─────────────────────────────────────────────────────────────────
 
   @SubscribeMessage('chat:send')

@@ -9,6 +9,7 @@ import { StatsService } from '../stats/stats.service';
 import { generateDeck, shuffle, Card } from './buraco/deck';
 import { validateMeld, canAddToMeld, canPickupDiscardPile, canPickupPot, hasBuraco, Meld } from './buraco/rules';
 import { calculateScore, calculateMatchReward } from './buraco/scoring';
+import { SocketService } from '../../common/socket/socket.service';
 
 export type TurnPhase = 'MUST_DRAW' | 'CAN_MELD_OR_DISCARD' | 'ROUND_ENDED';
 
@@ -45,6 +46,7 @@ export class GameEngineService {
     private redis: RedisService,
     private economyService: EconomyService,
     private statsService: StatsService,
+    private socketService: SocketService,
   ) {}
 
   @Cron(CronExpression.EVERY_5_SECONDS)
@@ -404,7 +406,8 @@ export class GameEngineService {
       }
     }
 
-    const winnerTeam = teamScores[1] > teamScores[2] ? 1 : 2;
+    // Ties go to team 1 (first-mover advantage tiebreaker)
+    const winnerTeam = teamScores[1] >= teamScores[2] ? 1 : 2;
     const winnerIds = state.players.filter((p) => p.teamId === winnerTeam).map((p) => p.userId);
     const duration = Math.floor((Date.now() - state.gameStartedAt) / 1000);
 
@@ -465,6 +468,12 @@ export class GameEngineService {
       await this.prisma.gameMove.create({
         data: { gameId, playerId, turnNumber: state.moveCount + 1, moveType: MoveType.DISCARD, cardData: { auto: true, card: card as any }, isValid: true },
       });
+
+      const lastMove = { type: 'TIMEOUT_DISCARD', playerId, cardId: card.id };
+      await this.socketService.emitPerPlayer(`game:${gameId}`, 'game:state_updated', async (userId) => ({
+        lastMove,
+        ...this.buildClientView(state, userId),
+      }));
 
       return { playerId, autoAction: 'DISCARD', card };
     }
