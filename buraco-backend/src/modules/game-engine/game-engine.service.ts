@@ -10,6 +10,8 @@ import { generateDeck, shuffle, Card } from './buraco/deck';
 import { validateMeld, canAddToMeld, canPickupDiscardPile, canPickupPot, hasBuraco, Meld } from './buraco/rules';
 import { calculateScore, calculateMatchReward } from './buraco/scoring';
 
+export type TurnPhase = 'MUST_DRAW' | 'CAN_MELD_OR_DISCARD' | 'ROUND_ENDED';
+
 export interface GameState {
   gameId: string;
   mode: GameMode;
@@ -24,6 +26,7 @@ export interface GameState {
   players: Array<{ userId: string; teamId: number; isConnected: boolean }>;
   turnOrder: string[];
   currentTurnIndex: number;
+  turnPhase: TurnPhase;
   gameStartedAt: number;
   turnStartedAt: number;
   turnDuration: number;
@@ -130,6 +133,7 @@ export class GameEngineService {
       players,
       turnOrder,
       currentTurnIndex: 0,
+      turnPhase: 'MUST_DRAW',
       gameStartedAt: now,
       turnStartedAt: now,
       turnDuration: 30,
@@ -185,7 +189,9 @@ export class GameEngineService {
       variant: state.variant,
       status: state.status,
       currentPlayerId,
+      turnPhase: state.turnPhase ?? 'MUST_DRAW',
       stockPileCount: state.stockPile.length,
+      discardPile: state.discardPile,
       topDiscardCard,
       discardPileCount: state.discardPile.length,
       potPileCounts: state.potPiles.map((p) => p.length),
@@ -212,20 +218,23 @@ export class GameEngineService {
     const currentPlayer = state.turnOrder[state.currentTurnIndex];
     if (currentPlayer !== playerId) throw new BadRequestException('NOT_YOUR_TURN');
 
+    const turnPhase: TurnPhase = state.turnPhase ?? 'MUST_DRAW';
     const hand = state.hands[playerId];
     let result: any = {};
 
     switch (move.type) {
       case MoveType.DRAW_STOCK: {
+        if (turnPhase !== 'MUST_DRAW') throw new BadRequestException('WRONG_PHASE');
         if (state.stockPile.length === 0) {
           // Reshuffle discard pile into stock, keeping the top card
-          if (state.discardPile.length <= 1) throw new BadRequestException('No cards left to draw');
+          if (state.discardPile.length <= 1) throw new BadRequestException('EMPTY_STOCK');
           const top = state.discardPile.pop()!;
           state.stockPile = shuffle(state.discardPile);
           state.discardPile = [top];
         }
         const card = state.stockPile.pop()!;
         hand.push(card);
+        state.turnPhase = 'CAN_MELD_OR_DISCARD';
         result = { card, handCount: hand.length, stockPileCount: state.stockPile.length };
 
         // Spec: game ends when only 2 cards remain in the deck
@@ -237,16 +246,23 @@ export class GameEngineService {
       }
 
       case MoveType.DRAW_DISCARD: {
+        if (turnPhase !== 'MUST_DRAW') throw new BadRequestException('WRONG_PHASE');
+        if (state.discardPile.length === 0) throw new BadRequestException('EMPTY_DISCARD');
         const topCard = state.discardPile[state.discardPile.length - 1];
-        if (!topCard) throw new BadRequestException('Discard pile is empty');
-        if (!canPickupDiscardPile(topCard, hand)) throw new BadRequestException('Cannot pick up discard pile');
-        state.discardPile.pop();
-        hand.push(topCard);
-        result = { card: topCard, handCount: hand.length };
+        // Classic: allow pickup freely; Professional: require top card can form a meld
+        if (state.mode !== GameMode.CLASSIC && !canPickupDiscardPile(topCard, hand)) {
+          throw new BadRequestException('Cannot pick up discard pile');
+        }
+        const takenCards = [...state.discardPile];
+        hand.push(...takenCards);
+        state.discardPile = [];
+        state.turnPhase = 'CAN_MELD_OR_DISCARD';
+        result = { takenCount: takenCards.length, handCount: hand.length };
         break;
       }
 
       case MoveType.PLAY_MELD: {
+        if (turnPhase !== 'CAN_MELD_OR_DISCARD') throw new BadRequestException('WRONG_PHASE');
         const cards = this.resolveCards(hand, move.cardIds || []);
         const validation = validateMeld(cards);
         if (!validation.valid) throw new BadRequestException(validation.reason || 'INVALID_MELD');
@@ -258,6 +274,7 @@ export class GameEngineService {
       }
 
       case MoveType.ADD_TO_MELD: {
+        if (turnPhase !== 'CAN_MELD_OR_DISCARD') throw new BadRequestException('WRONG_PHASE');
         const meld = state.melds[playerId]?.find((m) => m.id === move.meldId);
         if (!meld) throw new NotFoundException('Meld not found');
         const cards = this.resolveCards(hand, move.cardIds || []);
@@ -271,6 +288,7 @@ export class GameEngineService {
       }
 
       case MoveType.DISCARD: {
+        if (turnPhase !== 'CAN_MELD_OR_DISCARD') throw new BadRequestException('WRONG_PHASE');
         const cardId = move.cardIds?.[0];
         if (!cardId) throw new BadRequestException('No card specified for discard');
         const idx = hand.findIndex((c) => c.id === cardId);
@@ -311,10 +329,12 @@ export class GameEngineService {
         // Advance turn after discard
         state.currentTurnIndex = (state.currentTurnIndex + 1) % state.turnOrder.length;
         state.turnStartedAt = Date.now();
+        state.turnPhase = 'MUST_DRAW';
         break;
       }
 
       case MoveType.PICKUP_POT: {
+        if (turnPhase !== 'CAN_MELD_OR_DISCARD') throw new BadRequestException('WRONG_PHASE');
         if (!canPickupPot(hand)) throw new BadRequestException('Hand must be empty to pick up pot');
 
         const playerTeamId = state.players.find((p) => p.userId === playerId)?.teamId ?? 1;
@@ -439,6 +459,7 @@ export class GameEngineService {
       state.discardPile.push(card);
       state.currentTurnIndex = (state.currentTurnIndex + 1) % state.turnOrder.length;
       state.turnStartedAt = Date.now();
+      state.turnPhase = 'MUST_DRAW';
       await this.redis.setJson(this.stateKey(gameId), state, 86400);
 
       await this.prisma.gameMove.create({

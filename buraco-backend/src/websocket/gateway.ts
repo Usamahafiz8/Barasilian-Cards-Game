@@ -175,6 +175,22 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
 
   // ─── Game ─────────────────────────────────────────────────────────────────
 
+  private async broadcastGameState(gameId: string, lastMove: Record<string, unknown>) {
+    const sockets = await this.server.in(`game:${gameId}`).fetchSockets();
+    await Promise.all(
+      sockets.map(async (s) => {
+        const userId = s.data.userId as string;
+        if (!userId) return;
+        try {
+          const view = await this.gameEngine.getGameState(gameId, userId);
+          s.emit('game:state_updated', { lastMove, ...view });
+        } catch {
+          // Socket disconnected between move and broadcast — reconnect will sync
+        }
+      }),
+    );
+  }
+
   @SubscribeMessage('game:join')
   async handleGameJoin(@ConnectedSocket() socket: Socket, @MessageBody() data: { gameId: string }) {
     const userId = socket.data.userId;
@@ -205,11 +221,12 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
       const result = await this.gameEngine.processMove(data.gameId, userId, { type, source: data.source });
       if ('winnerTeam' in result) {
         this.server.to(`game:${data.gameId}`).emit('game:end', { gameId: data.gameId, ...result });
-        // Clear active game for all players in the room
         const sockets = await this.server.in(`game:${data.gameId}`).fetchSockets();
         await Promise.all(sockets.map((s) => this.reconnection.clearActiveGame(s.data.userId)));
       } else {
-        this.server.to(`game:${data.gameId}`).emit('game:move_played', { gameId: data.gameId, playerId: userId, moveType: type, result: result.result, nextTurnPlayerId: result.nextTurnPlayerId, turnTimeLimit: 30 });
+        const lastMove: Record<string, unknown> = { type: data.source === 'STOCK' ? 'DRAW' : 'PICKUP_DISCARD', source: data.source, playerId: userId };
+        if (data.source === 'STOCK' && result.result?.card) lastMove['drawnCardId'] = result.result.card.id;
+        await this.broadcastGameState(data.gameId, lastMove);
       }
     } catch (err) {
       socket.emit('game:move_invalid', { gameId: data.gameId, reason: (err as Error).message });
@@ -223,11 +240,10 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
       const result = await this.gameEngine.processMove(data.gameId, userId, { type: MoveType.DISCARD, cardIds: [data.cardId] });
       if (result && 'winnerTeam' in result) {
         this.server.to(`game:${data.gameId}`).emit('game:end', { gameId: data.gameId, ...result });
-        // Clear active game for all players in the room
         const sockets = await this.server.in(`game:${data.gameId}`).fetchSockets();
         await Promise.all(sockets.map((s) => this.reconnection.clearActiveGame(s.data.userId)));
       } else {
-        this.server.to(`game:${data.gameId}`).emit('game:move_played', { gameId: data.gameId, playerId: userId, moveType: MoveType.DISCARD, result: result.result, nextTurnPlayerId: result.nextTurnPlayerId, turnTimeLimit: 30 });
+        await this.broadcastGameState(data.gameId, { type: 'DISCARD', playerId: userId, cardId: data.cardId });
       }
     } catch (err) {
       socket.emit('game:move_invalid', { gameId: data.gameId, reason: (err as Error).message });
@@ -238,10 +254,8 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
   async handleMeld(@ConnectedSocket() socket: Socket, @MessageBody() data: { gameId: string; cardIds: string[] }) {
     const userId = socket.data.userId;
     try {
-      const result = await this.gameEngine.processMove(data.gameId, userId, { type: MoveType.PLAY_MELD, cardIds: data.cardIds });
-      if (!('winnerTeam' in result)) {
-        this.server.to(`game:${data.gameId}`).emit('game:move_played', { gameId: data.gameId, playerId: userId, moveType: MoveType.PLAY_MELD, result: result.result });
-      }
+      await this.gameEngine.processMove(data.gameId, userId, { type: MoveType.PLAY_MELD, cardIds: data.cardIds });
+      await this.broadcastGameState(data.gameId, { type: 'MELD', playerId: userId, cardIds: data.cardIds });
     } catch (err) {
       socket.emit('game:move_invalid', { gameId: data.gameId, reason: (err as Error).message });
     }
