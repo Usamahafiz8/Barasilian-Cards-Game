@@ -6,12 +6,36 @@ import { PrismaService } from '../../common/prisma/prisma.service';
 import { RedisService } from '../../common/redis/redis.service';
 import { EconomyService } from '../economy/economy.service';
 import { StatsService } from '../stats/stats.service';
-import { generateDeck, shuffle, Card } from './buraco/deck';
-import { validateMeld, canAddToMeld, canPickupDiscardPile, canPickupPot, hasBuraco, Meld } from './buraco/rules';
+import { generateDeck, shuffle, Card, tossRankValue } from './buraco/deck';
+import { validateMeld, canAddToMeld, canPickupDiscardPile, canPickupPot, hasBuraco, sortMeldCards, Meld } from './buraco/rules';
 import { calculateScore, calculateMatchReward } from './buraco/scoring';
 import { SocketService } from '../../common/socket/socket.service';
 
 export type TurnPhase = 'MUST_DRAW' | 'CAN_MELD_OR_DISCARD' | 'ROUND_ENDED';
+
+export interface TossEntry {
+  playerId: string;
+  seatIndex: number;
+  card: Card;
+  rankValue: number;
+}
+
+export interface TossRound {
+  round: number;
+  isTie: boolean;
+  players: TossEntry[];
+  winnerPlayerId?: string;
+  winnerSeatIndex?: number;
+  reason?: string;
+}
+
+export interface TossResult {
+  rounds: TossRound[];
+  winnerPlayerId: string;
+  winnerSeatIndex: number;
+  players: TossEntry[]; // final round entries
+  reason: string;
+}
 
 export interface GameState {
   gameId: string;
@@ -21,9 +45,9 @@ export interface GameState {
   stockPile: Card[];
   discardPile: Card[];
   potPiles: Card[][];
-  hands: Record<string, Card[]>;         // userId → cards (private)
-  melds: Record<string, Meld[]>;         // userId → melds
-  teamMelds: Record<number, Meld[]>;     // teamId → shared melds (for 2v2)
+  hands: Record<string, Card[]>;
+  melds: Record<string, Meld[]>;
+  teamMelds: Record<number, Meld[]>;
   players: Array<{ userId: string; teamId: number; isConnected: boolean }>;
   turnOrder: string[];
   currentTurnIndex: number;
@@ -32,9 +56,15 @@ export interface GameState {
   turnStartedAt: number;
   turnDuration: number;
   round: number;
-  scores: Record<number, number>;        // teamId → score
+  scores: Record<number, number>;
   moveCount: number;
-  potCollectedByTeam: number[];          // teamIds that have picked up their pot
+  potCollectedByTeam: number[];
+  // ── Setup / toss ─────────────────────────────────────────
+  seatMap: Record<string, number>;      // userId → stable seatIndex
+  usernames: Record<string, string>;    // userId → username
+  toss: TossResult | null;
+  setupComplete: boolean;
+  tossComplete: boolean;
 }
 
 @Injectable()
@@ -90,34 +120,46 @@ export class GameEngineService {
       include: { players: true },
     });
 
-    // Use DB-returned players as the single source of truth for all per-player structures
     const dbPlayers = game.players;
     const dbUserIds = dbPlayers.map((p) => p.userId);
 
-    // CLASSIC: 2 decks + jokers = 108 cards. PROFESSIONAL: 2 decks, no jokers = 104 cards.
+    // Fetch usernames in one query
+    const users = await this.prisma.user.findMany({
+      where: { id: { in: dbUserIds } },
+      select: { id: true, username: true },
+    });
+    const usernames: Record<string, string> = {};
+    for (const u of users) usernames[u.id] = u.username;
+
+    // Stable seat indices — order from DB
+    const seatMap: Record<string, number> = {};
+    dbPlayers.forEach((p, i) => { seatMap[p.userId] = i; });
+
+    // Run toss to determine who goes first
+    const tossResult = this.runToss(dbUserIds, seatMap);
+
+    // Deal cards
     const deck = shuffle(generateDeck(mode !== GameMode.PROFESSIONAL));
     const hands: Record<string, Card[]> = {};
     const potPiles: Card[][] = [[], []];
 
-    // Deal 11 cards to each player
     let deckIdx = 0;
     for (const player of dbPlayers) {
       hands[player.userId] = deck.slice(deckIdx, deckIdx + 11);
       deckIdx += 11;
     }
-
-    // Two pots of 11 cards each (both modes)
-    potPiles[0] = deck.slice(deckIdx, deckIdx + 11);
-    deckIdx += 11;
-    potPiles[1] = deck.slice(deckIdx, deckIdx + 11);
-    deckIdx += 11;
+    potPiles[0] = deck.slice(deckIdx, deckIdx + 11); deckIdx += 11;
+    potPiles[1] = deck.slice(deckIdx, deckIdx + 11); deckIdx += 11;
 
     const stockPile = deck.slice(deckIdx);
     const topCard = stockPile.pop();
     const discardPile: Card[] = topCard ? [topCard] : [];
 
-    // Turn order and all per-player maps derived from the same dbUserIds
-    const turnOrder = shuffle([...dbUserIds]);
+    // Turn order starts with toss winner
+    const turnOrder = [
+      tossResult.winnerPlayerId,
+      ...dbUserIds.filter((id) => id !== tossResult.winnerPlayerId),
+    ];
     const players = dbPlayers.map((p) => ({ userId: p.userId, teamId: p.teamId, isConnected: true }));
     const now = Date.now();
 
@@ -143,6 +185,11 @@ export class GameEngineService {
       scores: { 1: 0, 2: 0 },
       moveCount: 0,
       potCollectedByTeam: [],
+      seatMap,
+      usernames,
+      toss: tossResult,
+      setupComplete: true,
+      tossComplete: true,
     };
 
     await this.redis.setJson(this.stateKey(game.id), state, 86400);
@@ -156,11 +203,8 @@ export class GameEngineService {
   }
 
   /**
-   * Builds the player-specific view of game state sent to clients.
-   * - Adds convenience fields the Unity client needs directly (currentPlayerId,
-   *   stockPileCount, topDiscardCard, id alias on each player, hand per player)
-   * - Masks opponent hands so only card count is visible
-   * - Returned by both getGameState and processMove so shapes are identical
+   * Builds the per-player client view emitted by every game event.
+   * Includes stable seatIndex, username, toss metadata, and setup flags.
    */
   private buildClientView(state: GameState, requestingUserId: string) {
     const currentPlayerId = state.turnOrder[state.currentTurnIndex] ?? '';
@@ -168,7 +212,6 @@ export class GameEngineService {
       ? state.discardPile[state.discardPile.length - 1]
       : null;
 
-    // Local player always first so clients can safely use players[0] as themselves
     const sortedPlayers = [...state.players].sort((a, b) => {
       if (a.userId === requestingUserId) return -1;
       if (b.userId === requestingUserId) return 1;
@@ -176,10 +219,12 @@ export class GameEngineService {
     });
 
     const players = sortedPlayers.map((p) => ({
-      id: p.userId,          // alias expected by Unity client
+      id: p.userId,
       userId: p.userId,
+      username: state.usernames?.[p.userId] ?? '',
       teamId: p.teamId,
       isConnected: p.isConnected,
+      seatIndex: state.seatMap?.[p.userId] ?? 0,
       handCount: (state.hands[p.userId] || []).length,
       hand: p.userId === requestingUserId ? (state.hands[p.userId] || []) : [],
       melds: state.melds[p.userId] || [],
@@ -209,6 +254,9 @@ export class GameEngineService {
       scores: state.scores,
       moveCount: state.moveCount,
       potCollectedByTeam: state.potCollectedByTeam ?? [],
+      setupComplete: state.setupComplete ?? true,
+      tossComplete: state.tossComplete ?? true,
+      toss: state.toss ?? null,
     };
   }
 
@@ -228,7 +276,6 @@ export class GameEngineService {
       case MoveType.DRAW_STOCK: {
         if (turnPhase !== 'MUST_DRAW') throw new BadRequestException('WRONG_PHASE');
         if (state.stockPile.length === 0) {
-          // Reshuffle discard pile into stock, keeping the top card
           if (state.discardPile.length <= 1) throw new BadRequestException('EMPTY_STOCK');
           const top = state.discardPile.pop()!;
           state.stockPile = shuffle(state.discardPile);
@@ -239,7 +286,6 @@ export class GameEngineService {
         state.turnPhase = 'CAN_MELD_OR_DISCARD';
         result = { card, handCount: hand.length, stockPileCount: state.stockPile.length };
 
-        // Spec: game ends when only 2 cards remain in the deck
         if (state.stockPile.length < 2) {
           await this.redis.setJson(this.stateKey(gameId), state, 86400);
           return this.finalizeGame(gameId, state);
@@ -251,7 +297,6 @@ export class GameEngineService {
         if (turnPhase !== 'MUST_DRAW') throw new BadRequestException('WRONG_PHASE');
         if (state.discardPile.length === 0) throw new BadRequestException('EMPTY_DISCARD');
         const topCard = state.discardPile[state.discardPile.length - 1];
-        // Classic: allow pickup freely; Professional: require top card can form a meld
         if (state.mode !== GameMode.CLASSIC && !canPickupDiscardPile(topCard, hand)) {
           throw new BadRequestException('Cannot pick up discard pile');
         }
@@ -266,9 +311,17 @@ export class GameEngineService {
       case MoveType.PLAY_MELD: {
         if (turnPhase !== 'CAN_MELD_OR_DISCARD') throw new BadRequestException('WRONG_PHASE');
         const cards = this.resolveCards(hand, move.cardIds || []);
-        const validation = validateMeld(cards);
+        const validation = validateMeld(cards, state.mode as string);
         if (!validation.valid) throw new BadRequestException(validation.reason || 'INVALID_MELD');
-        const newMeld: Meld = { id: uuidv4(), cards, isNatural: cards.every((c) => !c.isWild), isCanasta: cards.length >= 7 };
+        const meldType = validation.type!;
+        const sortedCards = sortMeldCards(cards, meldType);
+        const newMeld: Meld = {
+          id: uuidv4(),
+          type: meldType,
+          cards: sortedCards,
+          isNatural: sortedCards.every((c) => !c.isWild),
+          isCanasta: sortedCards.length >= 7,
+        };
         state.melds[playerId].push(newMeld);
         (move.cardIds ?? []).forEach((id) => { const idx = hand.findIndex((c) => c.id === id); if (idx !== -1) hand.splice(idx, 1); });
         result = { meld: newMeld, handCount: hand.length };
@@ -280,8 +333,9 @@ export class GameEngineService {
         const meld = state.melds[playerId]?.find((m) => m.id === move.meldId);
         if (!meld) throw new NotFoundException('Meld not found');
         const cards = this.resolveCards(hand, move.cardIds || []);
-        if (!canAddToMeld(meld, cards)) throw new BadRequestException('Cannot add those cards to this meld');
+        if (!canAddToMeld(meld, cards, state.mode as string)) throw new BadRequestException('Cannot add those cards to this meld');
         meld.cards.push(...cards);
+        meld.cards = sortMeldCards(meld.cards, meld.type);
         meld.isCanasta = meld.cards.length >= 7;
         meld.isNatural = meld.cards.every((c) => !c.isWild);
         (move.cardIds ?? []).forEach((id) => { const idx = hand.findIndex((c) => c.id === id); if (idx !== -1) hand.splice(idx, 1); });
@@ -299,15 +353,12 @@ export class GameEngineService {
 
         const wouldClose = hand.length === 0 && state.potPiles.every((p) => p.length === 0);
         if (wouldClose) {
-          // CLASSIC: cannot close by discarding a wild card
           if (state.mode === GameMode.CLASSIC && card.isWild) {
             hand.push(card);
             throw new BadRequestException('Cannot close the game by discarding a wild card (Joker or Pinella)');
           }
 
           const playerTeamId = state.players.find((p) => p.userId === playerId)?.teamId ?? 1;
-
-          // Must have at least one Buraco on the team (either player in 2v2)
           const teamPlayerIds = state.players.filter((p) => p.teamId === playerTeamId).map((p) => p.userId);
           const teamHasBuraco = teamPlayerIds.some((uid) => hasBuraco(state.melds[uid] || []));
           if (!teamHasBuraco) {
@@ -315,7 +366,6 @@ export class GameEngineService {
             throw new BadRequestException('Your team must have at least one Buraco (7+ cards) to close the game');
           }
 
-          // Team must have collected their pot
           if (!(state.potCollectedByTeam ?? []).includes(playerTeamId)) {
             hand.push(card);
             throw new BadRequestException('Your team must collect the pot before closing the game');
@@ -328,7 +378,6 @@ export class GameEngineService {
         state.discardPile.push(card);
         result = { discardedCard: card, handCount: hand.length };
 
-        // Advance turn after discard
         state.currentTurnIndex = (state.currentTurnIndex + 1) % state.turnOrder.length;
         state.turnStartedAt = Date.now();
         state.turnPhase = 'MUST_DRAW';
@@ -341,12 +390,10 @@ export class GameEngineService {
 
         const playerTeamId = state.players.find((p) => p.userId === playerId)?.teamId ?? 1;
 
-        // Each team can only collect one pot per game
         if ((state.potCollectedByTeam ?? []).includes(playerTeamId)) {
           throw new BadRequestException('Your team has already collected their pot this game');
         }
 
-        // PROFESSIONAL: must have at least one Buraco before taking the pot
         if (state.mode === GameMode.PROFESSIONAL) {
           const teamPlayerIds = state.players.filter((p) => p.teamId === playerTeamId).map((p) => p.userId);
           const teamHasBuraco = teamPlayerIds.some((uid) => hasBuraco(state.melds[uid] || []));
@@ -370,7 +417,6 @@ export class GameEngineService {
     state.moveCount++;
     await this.redis.setJson(this.stateKey(gameId), state, 86400);
 
-    // Log move to DB
     await this.prisma.gameMove.create({
       data: { gameId, playerId, turnNumber: state.moveCount, moveType: move.type, cardData: result, isValid: true },
     });
@@ -386,19 +432,16 @@ export class GameEngineService {
     if (!state) state = (await this.redis.getJson<GameState>(this.stateKey(gameId))) ?? undefined;
     if (!state) throw new NotFoundException('Game not found');
 
-    // Calculate base scores from melds and hand penalties
     const teamScores: Record<number, number> = { 1: 0, 2: 0 };
     for (const player of state.players) {
       const score = calculateScore(state.melds[player.userId] || [], state.hands[player.userId] || [], state.mode);
       teamScores[player.teamId] = (teamScores[player.teamId] || 0) + score;
     }
 
-    // +100 closing bonus for the team that closed the game
     if (closerTeamId !== undefined) {
       teamScores[closerTeamId] = (teamScores[closerTeamId] || 0) + 100;
     }
 
-    // -100 pot penalty for every team that never collected their pot
     const collectedTeams = state.potCollectedByTeam ?? [];
     for (const teamId of [1, 2]) {
       if (!collectedTeams.includes(teamId)) {
@@ -406,12 +449,10 @@ export class GameEngineService {
       }
     }
 
-    // Ties go to team 1 (first-mover advantage tiebreaker)
     const winnerTeam = teamScores[1] >= teamScores[2] ? 1 : 2;
     const winnerIds = state.players.filter((p) => p.teamId === winnerTeam).map((p) => p.userId);
     const duration = Math.floor((Date.now() - state.gameStartedAt) / 1000);
 
-    // Persist result
     await this.prisma.$transaction(async (tx) => {
       await tx.gameSession.update({
         where: { id: gameId },
@@ -434,7 +475,6 @@ export class GameEngineService {
       });
     });
 
-    // Update stats and economy
     await Promise.all(state.players.map(async (p) => {
       const isWinner = winnerIds.includes(p.userId);
       const score = teamScores[p.teamId];
@@ -443,7 +483,6 @@ export class GameEngineService {
       await this.economyService.distributeMatchReward(p.userId, gameId, reward.coins);
     }));
 
-    // Cleanup Redis
     await this.redis.del(this.stateKey(gameId));
 
     return { winnerTeam, winnerIds, scores: teamScores, duration };
@@ -456,7 +495,6 @@ export class GameEngineService {
     const playerId = state.turnOrder[state.currentTurnIndex];
     const hand = state.hands[playerId];
 
-    // Auto-discard first card
     if (hand.length > 0) {
       const [card] = hand.splice(0, 1);
       state.discardPile.push(card);
@@ -477,6 +515,54 @@ export class GameEngineService {
 
       return { playerId, autoAction: 'DISCARD', card };
     }
+  }
+
+  // ── Toss ───────────────────────────────────────────────────────────────────
+
+  private runToss(playerIds: string[], seatMap: Record<string, number>): TossResult {
+    // Separate toss deck — non-Joker cards only so every draw has a rank value
+    let tossDeck = shuffle(generateDeck(false));
+    const rounds: TossRound[] = [];
+    let winnerPlayerId: string | null = null;
+    let winnerSeatIndex = 0;
+    let roundNum = 0;
+
+    while (!winnerPlayerId) {
+      roundNum++;
+      const entries: TossEntry[] = [];
+
+      for (const pid of playerIds) {
+        let card = tossDeck.pop();
+        while (!card || tossRankValue(card.rank) === 0) {
+          if (tossDeck.length === 0) tossDeck = shuffle(generateDeck(false));
+          card = tossDeck.pop();
+        }
+        entries.push({ playerId: pid, seatIndex: seatMap[pid], card, rankValue: tossRankValue(card.rank) });
+      }
+
+      const maxRank = Math.max(...entries.map((e) => e.rankValue));
+      const winners = entries.filter((e) => e.rankValue === maxRank);
+      const isTie = winners.length > 1;
+
+      const round: TossRound = { round: roundNum, isTie, players: entries };
+      if (!isTie) {
+        round.winnerPlayerId = winners[0].playerId;
+        round.winnerSeatIndex = winners[0].seatIndex;
+        round.reason = 'HIGH_CARD';
+        winnerPlayerId = winners[0].playerId;
+        winnerSeatIndex = winners[0].seatIndex;
+      }
+      rounds.push(round);
+    }
+
+    const finalRound = rounds[rounds.length - 1];
+    return {
+      rounds,
+      winnerPlayerId,
+      winnerSeatIndex,
+      players: finalRound.players,
+      reason: 'HIGH_CARD',
+    };
   }
 
   private resolveCards(hand: Card[], cardIds: string[]): Card[] {

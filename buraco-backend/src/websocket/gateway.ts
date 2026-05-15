@@ -197,6 +197,35 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
     socket.join(`game:${data.gameId}`);
     await this.redis.set(`user:${userId}:activeGame`, data.gameId, 86400);
     await this.reconnection.setActiveGame(userId, data.gameId);
+
+    // Emit full setup sequence so Unity can animate toss then deal.
+    try {
+      const view = await this.gameEngine.getGameState(data.gameId, userId);
+
+      // 1 — stable seat map (same payload for every player)
+      socket.emit('game:start_snapshot', {
+        gameId: data.gameId,
+        players: view.players.map((p) => ({
+          id: p.id,
+          userId: p.userId,
+          username: p.username,
+          seatIndex: p.seatIndex,
+          teamId: p.teamId,
+        })),
+        turnOrder: view.turnOrder,
+        currentTurnIndex: view.currentTurnIndex,
+      });
+
+      // 2 — toss result (Unity animates cards, shows winner)
+      if (view.toss) {
+        socket.emit('game:toss_result', { gameId: data.gameId, toss: view.toss });
+      }
+
+      // 3 — authoritative deal state (Unity animates real hand, not fake cards)
+      socket.emit('game:deal_start', view);
+    } catch (err) {
+      this.logger.error(`game:join setup failed for ${userId} in game ${data.gameId}`, err);
+    }
   }
 
   @SubscribeMessage('game:reconnect')
