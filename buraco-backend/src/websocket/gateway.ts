@@ -175,12 +175,12 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
 
   // ─── Game ─────────────────────────────────────────────────────────────────
 
-  private async broadcastGameState(gameId: string, lastMove: Record<string, unknown>) {
+  private async broadcastGameState(gameId: string, lastMove: Record<string, unknown>, skipUserId?: string) {
     const sockets = await this.server.in(`game:${gameId}`).fetchSockets();
     await Promise.all(
       sockets.map(async (s) => {
         const userId = s.data.userId as string;
-        if (!userId) return;
+        if (!userId || userId === skipUserId) return;
         try {
           const view = await this.gameEngine.getGameState(gameId, userId);
           s.emit('game:state_updated', { lastMove, ...view });
@@ -226,7 +226,11 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
       } else {
         const lastMove: Record<string, unknown> = { type: data.source === 'STOCK' ? 'DRAW' : 'PICKUP_DISCARD', source: data.source, playerId: userId };
         if (data.source === 'STOCK' && result.result?.card) lastMove['drawnCardId'] = result.result.card.id;
-        await this.broadcastGameState(data.gameId, lastMove);
+        // Emit directly to the mover using the already-computed state — this reaches the socket
+        // even when it hasn't joined the game room yet.
+        socket.emit('game:state_updated', { lastMove, ...result.state });
+        // Broadcast the authoritative per-player view to everyone else in the game room.
+        await this.broadcastGameState(data.gameId, lastMove, userId);
       }
     } catch (err) {
       socket.emit('game:move_invalid', { gameId: data.gameId, reason: (err as Error).message });
@@ -243,7 +247,9 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
         const sockets = await this.server.in(`game:${data.gameId}`).fetchSockets();
         await Promise.all(sockets.map((s) => this.reconnection.clearActiveGame(s.data.userId)));
       } else {
-        await this.broadcastGameState(data.gameId, { type: 'DISCARD', playerId: userId, cardId: data.cardId });
+        const lastMove = { type: 'DISCARD', playerId: userId, cardId: data.cardId };
+        socket.emit('game:state_updated', { lastMove, ...result.state });
+        await this.broadcastGameState(data.gameId, lastMove, userId);
       }
     } catch (err) {
       socket.emit('game:move_invalid', { gameId: data.gameId, reason: (err as Error).message });
@@ -254,8 +260,12 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
   async handleMeld(@ConnectedSocket() socket: Socket, @MessageBody() data: { gameId: string; cardIds: string[] }) {
     const userId = socket.data.userId;
     try {
-      await this.gameEngine.processMove(data.gameId, userId, { type: MoveType.PLAY_MELD, cardIds: data.cardIds });
-      await this.broadcastGameState(data.gameId, { type: 'MELD', playerId: userId, cardIds: data.cardIds });
+      const result = await this.gameEngine.processMove(data.gameId, userId, { type: MoveType.PLAY_MELD, cardIds: data.cardIds });
+      if (!('winnerTeam' in result)) {
+        const lastMove = { type: 'MELD', playerId: userId, cardIds: data.cardIds };
+        socket.emit('game:state_updated', { lastMove, ...result.state });
+        await this.broadcastGameState(data.gameId, lastMove, userId);
+      }
     } catch (err) {
       socket.emit('game:move_invalid', { gameId: data.gameId, reason: (err as Error).message });
     }
@@ -265,8 +275,12 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
   async handleAddToMeld(@ConnectedSocket() socket: Socket, @MessageBody() data: { gameId: string; meldId: string; cardIds: string[] }) {
     const userId = socket.data.userId;
     try {
-      await this.gameEngine.processMove(data.gameId, userId, { type: MoveType.ADD_TO_MELD, meldId: data.meldId, cardIds: data.cardIds });
-      await this.broadcastGameState(data.gameId, { type: 'ADD_TO_MELD', playerId: userId, meldId: data.meldId, cardIds: data.cardIds });
+      const result = await this.gameEngine.processMove(data.gameId, userId, { type: MoveType.ADD_TO_MELD, meldId: data.meldId, cardIds: data.cardIds });
+      if (!('winnerTeam' in result)) {
+        const lastMove = { type: 'ADD_TO_MELD', playerId: userId, meldId: data.meldId, cardIds: data.cardIds };
+        socket.emit('game:state_updated', { lastMove, ...result.state });
+        await this.broadcastGameState(data.gameId, lastMove, userId);
+      }
     } catch (err) {
       socket.emit('game:move_invalid', { gameId: data.gameId, reason: (err as Error).message });
     }
@@ -276,8 +290,12 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
   async handlePickupPot(@ConnectedSocket() socket: Socket, @MessageBody() data: { gameId: string }) {
     const userId = socket.data.userId;
     try {
-      await this.gameEngine.processMove(data.gameId, userId, { type: MoveType.PICKUP_POT });
-      await this.broadcastGameState(data.gameId, { type: 'PICKUP_POT', playerId: userId });
+      const result = await this.gameEngine.processMove(data.gameId, userId, { type: MoveType.PICKUP_POT });
+      if (!('winnerTeam' in result)) {
+        const lastMove = { type: 'PICKUP_POT', playerId: userId };
+        socket.emit('game:state_updated', { lastMove, ...result.state });
+        await this.broadcastGameState(data.gameId, lastMove, userId);
+      }
     } catch (err) {
       socket.emit('game:move_invalid', { gameId: data.gameId, reason: (err as Error).message });
     }
