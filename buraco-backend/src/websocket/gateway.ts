@@ -203,15 +203,20 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
       const view = await this.gameEngine.getGameState(data.gameId, userId);
 
       // 1 — stable seat map (same payload for every player)
-      socket.emit('game:start_snapshot', {
-        gameId: data.gameId,
-        players: view.players.map((p) => ({
-          id: p.id,
+      const seatMap = view.players
+        .map((p) => ({
+          playerId: p.userId,
           userId: p.userId,
           username: p.username,
           seatIndex: p.seatIndex,
           teamId: p.teamId,
-        })),
+        }))
+        .sort((a, b) => a.seatIndex - b.seatIndex);
+
+      socket.emit('game:start_snapshot', {
+        gameId: data.gameId,
+        seatMap,
+        players: seatMap.map((s) => ({ id: s.userId, ...s })),
         turnOrder: view.turnOrder,
         currentTurnIndex: view.currentTurnIndex,
       });
