@@ -305,7 +305,7 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
     }
   }
 
-  @SubscribeMessage('game:move:add_to_meld')
+  @SubscribeMessage('game:move:add-to-meld')
   async handleAddToMeld(@ConnectedSocket() socket: Socket, @MessageBody() data: { gameId: string; meldId: string; cardIds: string[] }) {
     const userId = socket.data.userId;
     try {

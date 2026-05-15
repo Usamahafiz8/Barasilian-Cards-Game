@@ -330,7 +330,13 @@ export class GameEngineService {
 
       case MoveType.ADD_TO_MELD: {
         if (turnPhase !== 'CAN_MELD_OR_DISCARD') throw new BadRequestException('WRONG_PHASE');
-        const meld = state.melds[playerId]?.find((m) => m.id === move.meldId);
+        const playerTeamId = state.players.find((p) => p.userId === playerId)?.teamId;
+        const teamUserIds = state.players.filter((p) => p.teamId === playerTeamId).map((p) => p.userId);
+        let meld: Meld | undefined;
+        for (const uid of teamUserIds) {
+          meld = state.melds[uid]?.find((m) => m.id === move.meldId);
+          if (meld) break;
+        }
         if (!meld) throw new NotFoundException('Meld not found');
         const cards = this.resolveCards(hand, move.cardIds || []);
         if (!canAddToMeld(meld, cards, state.mode as string)) throw new BadRequestException('Cannot add those cards to this meld');
