@@ -128,13 +128,21 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
 
       try {
         const connectedSockets = await this.server.in(`room:${roomId}`).fetchSockets();
-        const playerIds = connectedSockets.map((s) => s.data.userId as string).filter(Boolean);
+        const connectedIds = connectedSockets.map((s) => s.data.userId as string).filter(Boolean);
 
-        if (playerIds.length < room.maxPlayers) {
+        if (connectedIds.length < room.maxPlayers) {
           await this.redis.del(lockKey);
-          this.logger.warn(`Room ${roomId} is FULL but only ${playerIds.length}/${room.maxPlayers} sockets connected`);
+          this.logger.warn(`Room ${roomId} is FULL but only ${connectedIds.length}/${room.maxPlayers} sockets connected`);
           return;
         }
+
+        // Build player list in seat order so startGame assigns stable seatIndex correctly
+        const roomSeatMap = (await this.redis.hgetall(`room:${roomId}:seats`)) ?? {};
+        const seatOrderedIds = Object.entries(roomSeatMap)
+          .sort(([a], [b]) => parseInt(a) - parseInt(b))
+          .map(([, uid]) => uid)
+          .filter(Boolean);
+        const playerIds = seatOrderedIds.length === room.maxPlayers ? seatOrderedIds : connectedIds;
 
         const gameState = await this.gameEngine.startGame(roomId, room.mode, room.variant, playerIds);
         await this.roomsService.transitionToInProgress(roomId, gameState.gameId);

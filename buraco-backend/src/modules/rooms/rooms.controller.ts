@@ -55,11 +55,24 @@ export class RoomsController {
   @Post(':roomId/join')
   @ApiOperation({ summary: 'Join an existing room' })
   @ApiParam({ name: 'roomId', description: 'Room UUID' })
-  @ApiResponse({ status: 200, description: 'Joined room. Connect via WebSocket room:join event.' })
-  @ApiResponse({ status: 400, description: 'Room full, already in another room, or level/entry-fee requirements not met' })
+  @ApiBody({
+    required: false,
+    schema: {
+      type: 'object',
+      properties: {
+        requestedSeatIndex: { type: 'number', enum: [0, 1, 2, 3], description: 'Desired seat (TWO_VS_TWO only). Seat 0 & 2 = team 1, seat 1 & 3 = team 2.' },
+      },
+    },
+  })
+  @ApiResponse({ status: 200, description: 'Joined room. Response includes seatIndex and teamId. Connect via WebSocket room:join event.' })
+  @ApiResponse({ status: 400, description: 'Room full, seat taken, seat selection not supported for 1v1, or requirements not met' })
   @ApiResponse({ status: 404, description: 'Room not found' })
-  joinRoom(@CurrentUser('id') userId: string, @Param('roomId') roomId: string) {
-    return this.roomsService.joinRoom(userId, roomId);
+  joinRoom(
+    @CurrentUser('id') userId: string,
+    @Param('roomId') roomId: string,
+    @Body() body: { requestedSeatIndex?: number },
+  ) {
+    return this.roomsService.joinRoom(userId, roomId, body?.requestedSeatIndex);
   }
 
   @Post(':roomId/leave')
