@@ -325,6 +325,19 @@ export class GameEngineService {
         state.melds[playerId].push(newMeld);
         (move.cardIds ?? []).forEach((id) => { const idx = hand.findIndex((c) => c.id === id); if (idx !== -1) hand.splice(idx, 1); });
         result = { meld: newMeld, handCount: hand.length };
+        if (hand.length === 0) {
+          const potAward = this.tryAwardPot(state, playerId, 'PLAY_MELD');
+          if (potAward) {
+            result.potAwarded = potAward;
+          } else {
+            state.moveCount++;
+            await this.redis.setJson(this.stateKey(gameId), state, 86400);
+            await this.prisma.gameMove.create({
+              data: { gameId, playerId, turnNumber: state.moveCount, moveType: move.type, cardData: result, isValid: true },
+            });
+            return this.finalizeGame(gameId, state);
+          }
+        }
         break;
       }
 
@@ -346,6 +359,19 @@ export class GameEngineService {
         meld.isNatural = meld.cards.every((c) => !c.isWild);
         (move.cardIds ?? []).forEach((id) => { const idx = hand.findIndex((c) => c.id === id); if (idx !== -1) hand.splice(idx, 1); });
         result = { meld, handCount: hand.length };
+        if (hand.length === 0) {
+          const potAward = this.tryAwardPot(state, playerId, 'ADD_TO_MELD');
+          if (potAward) {
+            result.potAwarded = potAward;
+          } else {
+            state.moveCount++;
+            await this.redis.setJson(this.stateKey(gameId), state, 86400);
+            await this.prisma.gameMove.create({
+              data: { gameId, playerId, turnNumber: state.moveCount, moveType: move.type, cardData: result, isValid: true },
+            });
+            return this.finalizeGame(gameId, state);
+          }
+        }
         break;
       }
 
@@ -357,8 +383,16 @@ export class GameEngineService {
         if (idx === -1) throw new BadRequestException('Card not in hand');
         const [card] = hand.splice(idx, 1);
 
-        const wouldClose = hand.length === 0 && state.potPiles.every((p) => p.length === 0);
-        if (wouldClose) {
+        if (hand.length === 0) {
+          // Auto-award pot if eligible (tryAwardPot also advances the turn for DISCARD)
+          const potAward = this.tryAwardPot(state, playerId, 'DISCARD');
+          if (potAward) {
+            state.discardPile.push(card);
+            result = { discardedCard: card, handCount: hand.length, potAwarded: potAward };
+            break;
+          }
+
+          // No pot to award — validate and attempt close
           if (state.mode === GameMode.CLASSIC && card.isWild) {
             hand.push(card);
             throw new BadRequestException('Cannot close the game by discarding a wild card (Joker or Pinella)');
@@ -569,6 +603,36 @@ export class GameEngineService {
       players: finalRound.players,
       reason: 'HIGH_CARD',
     };
+  }
+
+  private tryAwardPot(
+    state: GameState,
+    playerId: string,
+    moveType: 'PLAY_MELD' | 'ADD_TO_MELD' | 'DISCARD',
+  ): { playerId: string; teamId: number; potIndex: number; cardCount: number; cardIds: string[] } | null {
+    const hand = state.hands[playerId];
+    if (hand.length !== 0) return null;
+
+    const teamId = state.players.find((p) => p.userId === playerId)?.teamId ?? 1;
+    if ((state.potCollectedByTeam ?? []).includes(teamId)) return null;
+
+    const potIndex = state.potPiles.findIndex((p) => p.length > 0);
+    if (potIndex === -1) return null;
+
+    const potCards = [...state.potPiles[potIndex]];
+    hand.push(...potCards);
+    state.potPiles[potIndex] = [];
+    if (!state.potCollectedByTeam) state.potCollectedByTeam = [];
+    state.potCollectedByTeam.push(teamId);
+
+    if (moveType === 'DISCARD') {
+      state.currentTurnIndex = (state.currentTurnIndex + 1) % state.turnOrder.length;
+      state.turnStartedAt = Date.now();
+      state.turnPhase = 'MUST_DRAW';
+    }
+    // For PLAY_MELD / ADD_TO_MELD: keep currentTurnIndex and CAN_MELD_OR_DISCARD phase
+
+    return { playerId, teamId, potIndex, cardCount: potCards.length, cardIds: potCards.map((c) => c.id) };
   }
 
   private resolveCards(hand: Card[], cardIds: string[]): Card[] {
