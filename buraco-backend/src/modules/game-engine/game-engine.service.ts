@@ -113,7 +113,7 @@ export class GameEngineService {
         players: {
           create: playerIds.map((userId, idx) => ({
             userId,
-            teamId: variant === GameVariant.ONE_VS_ONE ? idx + 1 : idx < 2 ? 1 : 2,
+            teamId: variant === GameVariant.ONE_VS_ONE ? idx + 1 : idx % 2 === 0 ? 1 : 2,
           })),
         },
       },
@@ -155,10 +155,11 @@ export class GameEngineService {
     const topCard = stockPile.pop();
     const discardPile: Card[] = topCard ? [topCard] : [];
 
-    // Turn order starts with toss winner
+    // Turn order: clockwise from toss winner's seat
+    const winnerSeat = seatMap[tossResult.winnerPlayerId] ?? 0;
     const turnOrder = [
-      tossResult.winnerPlayerId,
-      ...dbUserIds.filter((id) => id !== tossResult.winnerPlayerId),
+      ...dbUserIds.slice(winnerSeat),
+      ...dbUserIds.slice(0, winnerSeat),
     ];
     const players = dbPlayers.map((p) => ({ userId: p.userId, teamId: p.teamId, isConnected: true }));
     const now = Date.now();
@@ -218,6 +219,17 @@ export class GameEngineService {
       return 0;
     });
 
+    // Aggregate per-player melds into team meld panels — computed fresh each view
+    const teamMelds: Record<number, Meld[]> = {};
+    for (const p of state.players) {
+      if (!teamMelds[p.teamId]) teamMelds[p.teamId] = [];
+      for (const m of state.melds[p.userId] || []) {
+        teamMelds[p.teamId].push({ ...m, teamId: p.teamId });
+      }
+    }
+
+    const requestingTeamId = state.players.find((p) => p.userId === requestingUserId)?.teamId;
+
     const players = sortedPlayers.map((p) => ({
       id: p.userId,
       userId: p.userId,
@@ -226,8 +238,6 @@ export class GameEngineService {
       isConnected: p.isConnected,
       seatIndex: state.seatMap?.[p.userId] ?? 0,
       handCount: (state.hands[p.userId] || []).length,
-      hand: p.userId === requestingUserId ? (state.hands[p.userId] || []) : [],
-      melds: state.melds[p.userId] || [],
     }));
 
     return {
@@ -244,8 +254,8 @@ export class GameEngineService {
       potPileCounts: state.potPiles.map((p) => p.length),
       players,
       myHand: state.hands[requestingUserId] || [],
-      myMelds: state.melds[requestingUserId] || [],
-      teamMelds: state.teamMelds,
+      myMelds: requestingTeamId !== undefined ? (teamMelds[requestingTeamId] || []) : [],
+      teamMelds,
       turnOrder: state.turnOrder,
       currentTurnIndex: state.currentTurnIndex,
       turnStartedAt: state.turnStartedAt,
@@ -315,8 +325,10 @@ export class GameEngineService {
         if (!validation.valid) throw new BadRequestException(validation.reason || 'INVALID_MELD');
         const meldType = validation.type!;
         const sortedCards = sortMeldCards(cards, meldType);
+        const meldTeamId = state.players.find((p) => p.userId === playerId)?.teamId ?? 1;
         const newMeld: Meld = {
           id: uuidv4(),
+          teamId: meldTeamId,
           type: meldType,
           cards: sortedCards,
           isNatural: sortedCards.every((c) => !c.isWild),
@@ -464,6 +476,7 @@ export class GameEngineService {
     return {
       state: this.buildClientView(state, playerId),
       result,
+      teamId: state.players.find((p) => p.userId === playerId)?.teamId,
       nextTurnPlayerId: state.turnOrder[state.currentTurnIndex],
     };
   }

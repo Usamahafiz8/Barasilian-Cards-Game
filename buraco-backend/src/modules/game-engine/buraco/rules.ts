@@ -4,6 +4,7 @@ export type MeldType = 'SET' | 'RUN';
 
 export interface Meld {
   id: string;
+  teamId?: number;
   type: MeldType;
   cards: Card[];
   isNatural: boolean;
