@@ -213,11 +213,9 @@ export class GameEngineService {
       ? state.discardPile[state.discardPile.length - 1]
       : null;
 
-    const sortedPlayers = [...state.players].sort((a, b) => {
-      if (a.userId === requestingUserId) return -1;
-      if (b.userId === requestingUserId) return 1;
-      return 0;
-    });
+    const sortedPlayers = [...state.players].sort(
+      (a, b) => (state.seatMap?.[a.userId] ?? 0) - (state.seatMap?.[b.userId] ?? 0),
+    );
 
     // Aggregate per-player melds into team meld panels — computed fresh each view
     const teamMelds: Record<number, Meld[]> = {};
@@ -613,7 +611,7 @@ export class GameEngineService {
       rounds,
       winnerPlayerId,
       winnerSeatIndex,
-      players: finalRound.players,
+      players: [...finalRound.players].sort((a, b) => a.seatIndex - b.seatIndex),
       reason: 'HIGH_CARD',
     };
   }
