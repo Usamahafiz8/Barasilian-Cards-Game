@@ -1,5 +1,5 @@
-import { Body, Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
-import { ApiBearerAuth, ApiBody, ApiOperation, ApiParam, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { Body, Controller, Get, Param, Post, UseGuards } from '@nestjs/common';
+import { ApiBearerAuth, ApiBody, ApiOperation, ApiParam, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { GameMode, GameVariant } from '@prisma/client';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -13,12 +13,10 @@ export class RoomsController {
   constructor(private readonly roomsService: RoomsService) {}
 
   @Get()
-  @ApiOperation({ summary: 'Get list of active / waiting rooms' })
-  @ApiQuery({ name: 'mode',    required: false, enum: GameMode,    description: 'Filter by game mode' })
-  @ApiQuery({ name: 'variant', required: false, enum: GameVariant, description: 'Filter by game variant' })
-  @ApiResponse({ status: 200, description: 'Array of rooms with current player count' })
-  getRooms(@Query('mode') mode?: GameMode, @Query('variant') variant?: GameVariant) {
-    return this.roomsService.getRoomList(mode, variant);
+  @ApiOperation({ summary: 'Get lobby room list (4 default tables + custom rooms)' })
+  @ApiResponse({ status: 200, description: 'Array of rooms with seatList and seats details' })
+  getRooms() {
+    return this.roomsService.getRoomList();
   }
 
   @Get(':roomId')

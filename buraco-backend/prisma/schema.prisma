@@ -510,6 +510,8 @@ model Room {
   minPoints      Int?
   entryFeeCoins  Int         @default(0)
   gameId         String?     @unique
+  isDefaultTable Boolean     @default(false)
+  tableLabel     String?
   createdAt      DateTime    @default(now())
   updatedAt      DateTime    @updatedAt
 
