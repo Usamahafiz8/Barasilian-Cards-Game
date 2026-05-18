@@ -89,7 +89,7 @@ export class RoomsService implements OnModuleInit {
 
     if (existingId) {
       const room = await this.prisma.room.findUnique({ where: { id: existingId } });
-      if (room) return; // still valid
+      if (room) return;
     }
 
     const maxPlayers = variant === GameVariant.ONE_VS_ONE ? 2 : 4;
@@ -119,15 +119,86 @@ export class RoomsService implements OnModuleInit {
     return ids;
   }
 
+  // ── Seat count sync ────────────────────────────────────────────────────────
+  // Single source of truth: count actual numeric fields in Redis seats hash.
+  // This eliminates counter drift entirely — no increment/decrement anywhere.
+
+  private async recalculateAndSyncRoom(room: any): Promise<any | null> {
+    const seatsKey = this.seatsKey(room.id);
+    const hash = (await this.redis.hgetall(seatsKey)) ?? {};
+    const actualCount = Object.keys(hash).filter((f) => !f.includes(':')).length;
+
+    if (actualCount === 0 && !room.isDefaultTable) {
+      try {
+        await this.prisma.room.delete({ where: { id: room.id } });
+      } catch {
+        // Already deleted concurrently
+        return null;
+      }
+      this.socketService.emitToRoom('room_lobby', 'room:removed', { roomId: room.id });
+      return null;
+    }
+
+    const newStatus =
+      actualCount === 0              ? RoomStatus.EMPTY :
+      actualCount >= room.maxPlayers ? RoomStatus.FULL  :
+                                       RoomStatus.WAITING;
+
+    let updatedRoom: any;
+    try {
+      updatedRoom = await this.prisma.room.update({
+        where: { id: room.id },
+        data: { currentPlayers: actualCount, status: newStatus },
+      });
+    } catch {
+      return null; // deleted concurrently
+    }
+
+    const enriched = await this.enrichRoomWithSeats(updatedRoom);
+    this.socketService.emitToRoom(`room:${room.id}`, 'room:update', enriched);
+    this.socketService.emitToRoom('room_lobby', 'room:list_updated', enriched);
+    return updatedRoom;
+  }
+
+  // ── One-seat-per-user enforcement ──────────────────────────────────────────
+  // Remove this user from every lobby room except `exceptRoomId`.
+  // Called before joinRoom and switchSeat to guarantee one seat globally.
+
+  private async evictFromAllLobbyRooms(userId: string, exceptRoomId?: string) {
+    const lobbyRooms = await this.prisma.room.findMany({
+      where: {
+        gameId: null,
+        status: { in: [RoomStatus.EMPTY, RoomStatus.WAITING, RoomStatus.READY, RoomStatus.FULL] },
+        ...(exceptRoomId ? { id: { not: exceptRoomId } } : {}),
+      },
+    });
+
+    for (const room of lobbyRooms) {
+      const seatsKey = this.seatsKey(room.id);
+      const hash = (await this.redis.hgetall(seatsKey)) ?? {};
+      const userSeat = Object.entries(hash).find(([f, uid]) => !f.includes(':') && uid === userId)?.[0];
+      if (!userSeat) continue;
+
+      if (room.entryFeeCoins > 0) {
+        try {
+          await this.economyService.refundEntryFee(userId, room.id, room.entryFeeCoins);
+        } catch { /* don't block eviction on refund failure */ }
+      }
+
+      await this.redis.hdel(seatsKey, userSeat, `${userSeat}:u`);
+      await this.recalculateAndSyncRoom(room);
+    }
+
+    await this.redis.del(`user:${userId}:seatRoom`);
+  }
+
   // ── Seat enrichment ────────────────────────────────────────────────────────
 
   async enrichRoomWithSeats(room: any) {
     const hash = (await this.redis.hgetall(this.seatsKey(room.id))) ?? {};
 
-    // Collect only numeric seat fields (skip "0:u" username fields)
     const seatFields = Object.entries(hash).filter(([f]) => !f.includes(':'));
 
-    // Parallel fetch online status for all seated players
     const onlineFlags = await Promise.all(
       seatFields.map(([, userId]) => this.redis.get(`online:${userId}`)),
     );
@@ -169,7 +240,6 @@ export class RoomsService implements OnModuleInit {
       }),
     ]);
 
-    // Preserve the canonical DEFAULT_TABLES order for the first 4 slots
     const sortedDefaults = DEFAULT_TABLES
       .map((t) => defaultRooms.find((r) => r.mode === t.mode && r.variant === t.variant))
       .filter((r): r is NonNullable<typeof r> => !!r);
@@ -204,6 +274,9 @@ export class RoomsService implements OnModuleInit {
   }
 
   async joinRoom(userId: string, roomId: string, requestedSeatIndex?: number) {
+    // Enforce one lobby seat per user — remove any ghost seats in other rooms first
+    await this.evictFromAllLobbyRooms(userId, roomId);
+
     const room = await this.prisma.room.findUnique({ where: { id: roomId } });
     if (!room) throw new NotFoundException('Room not found');
     if (room.status === RoomStatus.IN_PROGRESS) throw new BadRequestException('ROOM_NOT_WAITING');
@@ -224,7 +297,6 @@ export class RoomsService implements OnModuleInit {
     const seatsKey = this.seatsKey(roomId);
     const hash = (await this.redis.hgetall(seatsKey)) ?? {};
 
-    // Only look at numeric seat fields for duplicate / occupancy checks
     const occupiedEntries = Object.entries(hash).filter(([f]) => !f.includes(':'));
     const occupiedUserIds = occupiedEntries.map(([, uid]) => uid);
     const occupiedSeats = new Set(occupiedEntries.map(([f]) => parseInt(f, 10)));
@@ -246,7 +318,6 @@ export class RoomsService implements OnModuleInit {
       assignedSeat = available;
     }
 
-    // Look up username to store alongside the seat
     const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { username: true } });
     const username = user?.username ?? '';
 
@@ -257,19 +328,8 @@ export class RoomsService implements OnModuleInit {
     // Track which room this user is seated in (used for disconnect cleanup)
     await this.redis.set(`user:${userId}:seatRoom`, roomId, 86400);
 
-    // ── Update DB ────────────────────────────────────────────────────────────
-    const newCount = room.currentPlayers + 1;
-    const newStatus = newCount >= room.maxPlayers ? RoomStatus.FULL : RoomStatus.WAITING;
-
-    const updatedRoom = await this.prisma.room.update({
-      where: { id: roomId },
-      data: { currentPlayers: { increment: 1 }, status: newStatus },
-    });
-
-    // ── Broadcast lobby & room channel ───────────────────────────────────────
-    const enriched = await this.enrichRoomWithSeats(updatedRoom);
-    this.socketService.emitToRoom(`room:${roomId}`, 'room:update', enriched);
-    this.socketService.emitToRoom('room_lobby', 'room:list_updated', enriched);
+    // Sync DB count from actual seat state
+    const updatedRoom = await this.recalculateAndSyncRoom(room) ?? room;
 
     const teamId = assignedSeat % 2 === 0 ? 1 : 2;
     return { ...updatedRoom, seatIndex: assignedSeat, teamId };
@@ -295,6 +355,9 @@ export class RoomsService implements OnModuleInit {
 
     const occupiedSeats = new Set(occupiedEntries.map(([f]) => parseInt(f, 10)));
     if (occupiedSeats.has(requestedSeatIndex)) throw new BadRequestException('SEAT_TAKEN');
+
+    // Clean up any ghost seats in other rooms
+    await this.evictFromAllLobbyRooms(userId, roomId);
 
     const username = hash[`${currentSeat}:u`] ?? '';
 
@@ -327,55 +390,25 @@ export class RoomsService implements OnModuleInit {
       await this.redis.hdel(seatsKey, userSeat, `${userSeat}:u`);
     }
 
-    // Clear the seat-room tracking key
     await this.redis.del(`user:${userId}:seatRoom`);
 
-    const newCount = Math.max(0, room.currentPlayers - 1);
+    // Recalculate from actual seat count — no drift possible
+    const updatedRoom = await this.recalculateAndSyncRoom(room);
+    return updatedRoom ?? { ...room, currentPlayers: 0, status: RoomStatus.EMPTY };
+  }
 
-    if (newCount === 0 && !room.isDefaultTable) {
-      await this.prisma.room.delete({ where: { id: roomId } });
-      this.socketService.emitToRoom('room_lobby', 'room:removed', { roomId });
-      return { ...room, currentPlayers: 0, status: RoomStatus.EMPTY };
-    }
-
-    const newStatus = newCount === 0 ? RoomStatus.EMPTY : RoomStatus.WAITING;
-
-    const updatedRoom = await this.prisma.room.update({
-      where: { id: roomId },
-      data: { currentPlayers: { decrement: 1 }, status: newStatus },
-    });
-
-    const enriched = await this.enrichRoomWithSeats(updatedRoom);
-    this.socketService.emitToRoom(`room:${roomId}`, 'room:update', enriched);
-    this.socketService.emitToRoom('room_lobby', 'room:list_updated', enriched);
-
-    return updatedRoom;
+  async leaveAllLobby(userId: string) {
+    await this.evictFromAllLobbyRooms(userId);
+    return { success: true };
   }
 
   // Called by the gateway after a disconnect grace period
   async handleDisconnectSeat(userId: string) {
-    const roomId = await this.redis.get(`user:${userId}:seatRoom`);
-    if (!roomId) return;
-
-    const room = await this.prisma.room.findUnique({ where: { id: roomId } });
-    if (!room) {
-      await this.redis.del(`user:${userId}:seatRoom`);
-      return;
-    }
-
-    // Only remove from pre-game rooms; IN_PROGRESS has its own reconnect handling
-    if (room.status === RoomStatus.IN_PROGRESS) return;
-
-    try {
-      await this.leaveRoom(userId, roomId);
-    } catch {
-      // Room may already be gone; clean up the tracking key anyway
-      await this.redis.del(`user:${userId}:seatRoom`);
-    }
+    // evictFromAllLobbyRooms scans every pre-game room so no room is missed
+    await this.evictFromAllLobbyRooms(userId);
   }
 
   async transitionToInProgress(roomId: string, gameId: string) {
-    // Seat map is no longer needed once game state lives in Redis game state
     await this.redis.del(this.seatsKey(roomId));
 
     const updatedRoom = await this.prisma.room.update({
@@ -383,18 +416,15 @@ export class RoomsService implements OnModuleInit {
       data: { status: RoomStatus.IN_PROGRESS, gameId },
     });
 
-    // Immediately reseed the default slot so a new EMPTY table appears in the lobby
     if (updatedRoom.isDefaultTable) {
       const tableConfig = DEFAULT_TABLES.find(
         (t) => t.mode === updatedRoom.mode && t.variant === updatedRoom.variant,
       );
       const label = tableConfig?.label ?? updatedRoom.tableLabel ?? '';
-      // Clear the Redis pointer so seedDefaultTableIfMissing creates a fresh room
       await this.redis.del(this.defaultTableKey(updatedRoom.mode, updatedRoom.variant));
       await this.seedDefaultTableIfMissing(updatedRoom.mode, updatedRoom.variant, label);
     }
 
-    // Notify lobby that this room is now IN_PROGRESS
     const enriched = await this.enrichRoomWithSeats(updatedRoom);
     this.socketService.emitToRoom('room_lobby', 'room:list_updated', enriched);
 

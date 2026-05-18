@@ -73,6 +73,13 @@ export class RoomsController {
     return this.roomsService.joinRoom(userId, roomId, body?.requestedSeatIndex);
   }
 
+  @Post('leave-all-lobby')
+  @ApiOperation({ summary: 'Remove authenticated user from all EMPTY/WAITING lobby rooms' })
+  @ApiResponse({ status: 200, description: '{ success: true }' })
+  leaveAllLobby(@CurrentUser('id') userId: string) {
+    return this.roomsService.leaveAllLobby(userId);
+  }
+
   @Post(':roomId/leave')
   @ApiOperation({ summary: 'Leave a room before game starts' })
   @ApiParam({ name: 'roomId', description: 'Room UUID' })
