@@ -81,6 +81,18 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
         reconnectWindowSeconds: timeout,
       });
     }
+
+    // Grace period: remove player from lobby room if still offline after 15 s
+    const seatRoomId = await this.redis.get(`user:${userId}:seatRoom`);
+    if (seatRoomId) {
+      setTimeout(async () => {
+        const stillOnline = await this.redis.get(`online:${userId}`);
+        if (!stillOnline) {
+          this.logger.log(`Removing disconnected user ${userId} from lobby room ${seatRoomId}`);
+          await this.roomsService.handleDisconnectSeat(userId);
+        }
+      }, 15_000);
+    }
   }
 
   // ─── Presence ─────────────────────────────────────────────────────────────

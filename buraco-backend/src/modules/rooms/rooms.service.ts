@@ -254,6 +254,9 @@ export class RoomsService implements OnModuleInit {
     await this.redis.hset(seatsKey, `${assignedSeat}:u`, username);
     await this.redis.expire(seatsKey, 86400);
 
+    // Track which room this user is seated in (used for disconnect cleanup)
+    await this.redis.set(`user:${userId}:seatRoom`, roomId, 86400);
+
     // ── Update DB ────────────────────────────────────────────────────────────
     const newCount = room.currentPlayers + 1;
     const newStatus = newCount >= room.maxPlayers ? RoomStatus.FULL : RoomStatus.WAITING;
@@ -272,6 +275,43 @@ export class RoomsService implements OnModuleInit {
     return { ...updatedRoom, seatIndex: assignedSeat, teamId };
   }
 
+  async switchSeat(userId: string, roomId: string, requestedSeatIndex: number) {
+    const room = await this.prisma.room.findUnique({ where: { id: roomId } });
+    if (!room) throw new NotFoundException('Room not found');
+    if (room.status === RoomStatus.IN_PROGRESS) throw new BadRequestException('ROOM_NOT_WAITING');
+
+    const seatsKey = this.seatsKey(roomId);
+    const hash = (await this.redis.hgetall(seatsKey)) ?? {};
+
+    const occupiedEntries = Object.entries(hash).filter(([f]) => !f.includes(':'));
+    const currentSeatEntry = occupiedEntries.find(([, uid]) => uid === userId);
+    if (!currentSeatEntry) throw new BadRequestException('NOT_IN_ROOM');
+
+    const currentSeat = currentSeatEntry[0];
+    const maxSeat = room.variant === GameVariant.TWO_VS_TWO ? 3 : 1;
+
+    if (requestedSeatIndex < 0 || requestedSeatIndex > maxSeat) throw new BadRequestException('INVALID_SEAT_INDEX');
+    if (String(requestedSeatIndex) === currentSeat) throw new BadRequestException('ALREADY_IN_SEAT');
+
+    const occupiedSeats = new Set(occupiedEntries.map(([f]) => parseInt(f, 10)));
+    if (occupiedSeats.has(requestedSeatIndex)) throw new BadRequestException('SEAT_TAKEN');
+
+    const username = hash[`${currentSeat}:u`] ?? '';
+
+    // Remove old seat, write new seat (Redis is single-threaded — effectively atomic)
+    await this.redis.hdel(seatsKey, currentSeat, `${currentSeat}:u`);
+    await this.redis.hset(seatsKey, String(requestedSeatIndex), userId);
+    await this.redis.hset(seatsKey, `${requestedSeatIndex}:u`, username);
+    await this.redis.expire(seatsKey, 86400);
+
+    const enriched = await this.enrichRoomWithSeats(room);
+    this.socketService.emitToRoom(`room:${roomId}`, 'room:update', enriched);
+    this.socketService.emitToRoom('room_lobby', 'room:list_updated', enriched);
+
+    const teamId = requestedSeatIndex % 2 === 0 ? 1 : 2;
+    return { ...enriched, seatIndex: requestedSeatIndex, teamId };
+  }
+
   async leaveRoom(userId: string, roomId: string) {
     const room = await this.prisma.room.findUnique({ where: { id: roomId } });
     if (!room) throw new NotFoundException('Room not found');
@@ -286,6 +326,9 @@ export class RoomsService implements OnModuleInit {
     if (userSeat) {
       await this.redis.hdel(seatsKey, userSeat, `${userSeat}:u`);
     }
+
+    // Clear the seat-room tracking key
+    await this.redis.del(`user:${userId}:seatRoom`);
 
     const newCount = Math.max(0, room.currentPlayers - 1);
 
@@ -307,6 +350,28 @@ export class RoomsService implements OnModuleInit {
     this.socketService.emitToRoom('room_lobby', 'room:list_updated', enriched);
 
     return updatedRoom;
+  }
+
+  // Called by the gateway after a disconnect grace period
+  async handleDisconnectSeat(userId: string) {
+    const roomId = await this.redis.get(`user:${userId}:seatRoom`);
+    if (!roomId) return;
+
+    const room = await this.prisma.room.findUnique({ where: { id: roomId } });
+    if (!room) {
+      await this.redis.del(`user:${userId}:seatRoom`);
+      return;
+    }
+
+    // Only remove from pre-game rooms; IN_PROGRESS has its own reconnect handling
+    if (room.status === RoomStatus.IN_PROGRESS) return;
+
+    try {
+      await this.leaveRoom(userId, roomId);
+    } catch {
+      // Room may already be gone; clean up the tracking key anyway
+      await this.redis.del(`user:${userId}:seatRoom`);
+    }
   }
 
   async transitionToInProgress(roomId: string, gameId: string) {

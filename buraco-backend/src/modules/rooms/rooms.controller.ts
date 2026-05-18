@@ -81,4 +81,27 @@ export class RoomsController {
   leaveRoom(@CurrentUser('id') userId: string, @Param('roomId') roomId: string) {
     return this.roomsService.leaveRoom(userId, roomId);
   }
+
+  @Post(':roomId/switch-seat')
+  @ApiOperation({ summary: 'Switch to a different empty seat in the same room' })
+  @ApiParam({ name: 'roomId', description: 'Room UUID' })
+  @ApiBody({
+    schema: {
+      type: 'object',
+      properties: {
+        requestedSeatIndex: { type: 'number', enum: [0, 1, 2, 3], description: 'Target seat index' },
+      },
+      required: ['requestedSeatIndex'],
+    },
+  })
+  @ApiResponse({ status: 200, description: 'Seat switched. Response includes updated seatList.' })
+  @ApiResponse({ status: 400, description: 'NOT_IN_ROOM | SEAT_TAKEN | INVALID_SEAT_INDEX | ALREADY_IN_SEAT | ROOM_NOT_WAITING' })
+  @ApiResponse({ status: 404, description: 'Room not found' })
+  switchSeat(
+    @CurrentUser('id') userId: string,
+    @Param('roomId') roomId: string,
+    @Body() body: { requestedSeatIndex: number },
+  ) {
+    return this.roomsService.switchSeat(userId, roomId, body.requestedSeatIndex);
+  }
 }
