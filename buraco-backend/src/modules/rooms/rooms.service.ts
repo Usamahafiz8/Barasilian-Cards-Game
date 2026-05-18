@@ -45,6 +45,7 @@ export class RoomsService implements OnModuleInit {
   ) {}
 
   async onModuleInit() {
+    await this.purgeStaleCustomRooms();
     await this.ensureDefaultTables();
   }
 
@@ -56,6 +57,18 @@ export class RoomsService implements OnModuleInit {
 
   private defaultTableKey(mode: GameMode, variant: GameVariant) {
     return `default:table:${mode}:${variant}`;
+  }
+
+  // ── Stale room cleanup ─────────────────────────────────────────────────────
+
+  private async purgeStaleCustomRooms() {
+    await this.prisma.room.deleteMany({
+      where: {
+        isDefaultTable: false,
+        status: RoomStatus.EMPTY,
+        currentPlayers: 0,
+      },
+    });
   }
 
   // ── Default table management ───────────────────────────────────────────────
@@ -150,7 +163,7 @@ export class RoomsService implements OnModuleInit {
       this.prisma.room.findMany({
         where: {
           isDefaultTable: false,
-          status: { in: [RoomStatus.EMPTY, RoomStatus.WAITING, RoomStatus.FULL, RoomStatus.READY, RoomStatus.IN_PROGRESS] },
+          status: { in: [RoomStatus.WAITING, RoomStatus.FULL, RoomStatus.READY, RoomStatus.IN_PROGRESS] },
         },
         orderBy: { createdAt: 'desc' },
       }),
@@ -275,6 +288,13 @@ export class RoomsService implements OnModuleInit {
     }
 
     const newCount = Math.max(0, room.currentPlayers - 1);
+
+    if (newCount === 0 && !room.isDefaultTable) {
+      await this.prisma.room.delete({ where: { id: roomId } });
+      this.socketService.emitToRoom('room_lobby', 'room:removed', { roomId });
+      return { ...room, currentPlayers: 0, status: RoomStatus.EMPTY };
+    }
+
     const newStatus = newCount === 0 ? RoomStatus.EMPTY : RoomStatus.WAITING;
 
     const updatedRoom = await this.prisma.room.update({
