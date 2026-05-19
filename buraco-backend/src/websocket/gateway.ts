@@ -139,24 +139,24 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
       if (!locked) return;
 
       try {
-        const connectedSockets = await this.server.in(`room:${roomId}`).fetchSockets();
-        const connectedIds = connectedSockets.map((s) => s.data.userId as string).filter(Boolean);
-
-        if (connectedIds.length < room.maxPlayers) {
-          await this.redis.del(lockKey);
-          this.logger.warn(`Room ${roomId} is FULL but only ${connectedIds.length}/${room.maxPlayers} sockets connected`);
-          return;
-        }
-
-        // Build player list in seat order so startGame assigns stable seatIndex correctly
+        // Use the Redis seat hash as the authoritative player list.
+        // Filtering out ":u" username fields gives only the numeric seat entries.
+        // This avoids the race condition where fetchSockets() may not yet include
+        // a socket that called socket.join() in a concurrent room:join handler.
         const roomSeatMap = (await this.redis.hgetall(`room:${roomId}:seats`)) ?? {};
         const seatOrderedIds = Object.entries(roomSeatMap)
+          .filter(([f]) => !f.includes(':'))
           .sort(([a], [b]) => parseInt(a) - parseInt(b))
           .map(([, uid]) => uid)
           .filter(Boolean);
-        const playerIds = seatOrderedIds.length === room.maxPlayers ? seatOrderedIds : connectedIds;
 
-        const gameState = await this.gameEngine.startGame(roomId, room.mode, room.variant, playerIds);
+        if (seatOrderedIds.length < room.maxPlayers) {
+          await this.redis.del(lockKey);
+          this.logger.warn(`Room ${roomId} is FULL in DB but only ${seatOrderedIds.length}/${room.maxPlayers} seats in Redis`);
+          return;
+        }
+
+        const gameState = await this.gameEngine.startGame(roomId, room.mode, room.variant, seatOrderedIds);
         await this.roomsService.transitionToInProgress(roomId, gameState.gameId);
 
         this.server.to(`room:${roomId}`).emit('room:update', {

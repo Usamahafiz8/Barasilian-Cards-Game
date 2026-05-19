@@ -213,11 +213,11 @@ export class RoomsService implements OnModuleInit {
       const isConnected = !!onlineFlags[i];
       const teamId = seatIndex % 2 === 0 ? 1 : 2;
 
-      // For lobby rooms, disconnected seats are scheduled for eviction and excluded
-      // from the seat list so Unity does not render them as occupied.
+      // Schedule lazy eviction for disconnected lobby seats — they will be removed
+      // from Redis after the grace period and disappear from future responses.
+      // We still include them in seatList now so currentPlayers === seatList.length.
       if (isLobbyRoom && !isConnected) {
         this.scheduleLazySeatEviction(userId);
-        return;
       }
 
       seats[String(seatIndex)] = { userId, username, teamId, isConnected };
