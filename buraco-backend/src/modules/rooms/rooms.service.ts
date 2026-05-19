@@ -205,6 +205,7 @@ export class RoomsService implements OnModuleInit {
 
     const seats: Record<string, { userId: string; username: string; teamId: number; isConnected: boolean }> = {};
     const seatList: SeatEntry[] = [];
+    const isLobbyRoom = room.status !== RoomStatus.IN_PROGRESS;
 
     seatFields.forEach(([field, userId], i) => {
       const seatIndex = parseInt(field, 10);
@@ -212,12 +213,36 @@ export class RoomsService implements OnModuleInit {
       const isConnected = !!onlineFlags[i];
       const teamId = seatIndex % 2 === 0 ? 1 : 2;
 
+      // For lobby rooms, disconnected seats are scheduled for eviction and excluded
+      // from the seat list so Unity does not render them as occupied.
+      if (isLobbyRoom && !isConnected) {
+        this.scheduleLazySeatEviction(userId);
+        return;
+      }
+
       seats[String(seatIndex)] = { userId, username, teamId, isConnected };
       seatList.push({ seatIndex, teamId, userId, username, isConnected });
     });
 
     seatList.sort((a, b) => a.seatIndex - b.seatIndex);
     return { ...room, seats, seatList };
+  }
+
+  // Schedules a one-shot eviction for a disconnected lobby seat.
+  // A Redis lock prevents duplicate timers from stacking on repeated GET /rooms calls.
+  private scheduleLazySeatEviction(userId: string) {
+    const lockKey = `seat:evict:lock:${userId}`;
+    // setNx returns 'OK' only on first call; subsequent calls within 30 s are no-ops.
+    this.redis.setNx(lockKey, '1', 30).then((locked) => {
+      if (!locked) return;
+      setTimeout(async () => {
+        const stillOnline = await this.redis.get(`online:${userId}`);
+        if (!stillOnline) {
+          await this.evictFromAllLobbyRooms(userId);
+        }
+        // Lock TTL handles its own expiry; no manual del needed.
+      }, 30_000);
+    }).catch(() => { /* never throws — fire and forget */ });
   }
 
   async getRoomSeats(roomId: string): Promise<Record<string, string>> {
@@ -324,6 +349,10 @@ export class RoomsService implements OnModuleInit {
     await this.redis.hset(seatsKey, String(assignedSeat), userId);
     await this.redis.hset(seatsKey, `${assignedSeat}:u`, username);
     await this.redis.expire(seatsKey, 86400);
+
+    // Mark user online now so isConnected=true is returned immediately on HTTP join,
+    // even before the WebSocket room:join event fires. WS ping refreshes this every 30 s.
+    await this.redis.set(`online:${userId}`, '1', 60);
 
     // Track which room this user is seated in (used for disconnect cleanup)
     await this.redis.set(`user:${userId}:seatRoom`, roomId, 86400);
