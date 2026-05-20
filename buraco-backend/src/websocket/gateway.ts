@@ -278,10 +278,9 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
         const sockets = await this.server.in(`game:${data.gameId}`).fetchSockets();
         await Promise.all(sockets.map((s) => this.reconnection.clearActiveGame(s.data.userId)));
       } else {
-        const lastMove: Record<string, unknown> = { type: data.source === 'STOCK' ? 'DRAW' : 'PICKUP_DISCARD', source: data.source, playerId: userId };
-        if (data.source === 'STOCK' && result.result?.card) lastMove['drawnCardId'] = result.result.card.id;
-        // Emit directly to the mover using the already-computed state — this reaches the socket
-        // even when it hasn't joined the game room yet.
+        const lastMove: Record<string, unknown> = data.source === 'STOCK'
+          ? { type: 'DRAW', playerId: userId, teamId: result.teamId, source: 'STOCK', cardIds: result.result?.card ? [result.result.card.id] : [] }
+          : { type: 'PICKUP_DISCARD', playerId: userId, teamId: result.teamId, source: 'DISCARD', cardIds: result.result?.takenCardIds ?? [] };
         socket.emit('game:state_updated', { lastMove, ...result.state });
         // Broadcast the authoritative per-player view to everyone else in the game room.
         await this.broadcastGameState(data.gameId, lastMove, userId);
@@ -321,7 +320,7 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
         const sockets = await this.server.in(`game:${data.gameId}`).fetchSockets();
         await Promise.all(sockets.map((s) => this.reconnection.clearActiveGame(s.data.userId)));
       } else {
-        const lastMove: Record<string, unknown> = { type: 'MELD', playerId: userId, teamId: result.teamId, cardIds: data.cardIds };
+        const lastMove: Record<string, unknown> = { type: 'MELD', playerId: userId, teamId: result.teamId, meldId: result.result?.meld?.id, cardIds: data.cardIds };
         if (result.result?.potAwarded) lastMove['potAwarded'] = result.result.potAwarded;
         socket.emit('game:state_updated', { lastMove, ...result.state });
         await this.broadcastGameState(data.gameId, lastMove, userId);

@@ -312,7 +312,7 @@ export class GameEngineService {
         hand.push(...takenCards);
         state.discardPile = [];
         state.turnPhase = 'CAN_MELD_OR_DISCARD';
-        result = { takenCount: takenCards.length, handCount: hand.length };
+        result = { takenCount: takenCards.length, takenCardIds: takenCards.map((c) => c.id), handCount: hand.length };
         break;
       }
 
