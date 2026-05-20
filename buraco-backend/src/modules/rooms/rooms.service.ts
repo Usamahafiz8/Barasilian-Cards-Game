@@ -144,11 +144,48 @@ export class RoomsService implements OnModuleInit {
       actualCount >= room.maxPlayers ? RoomStatus.FULL  :
                                        RoomStatus.WAITING;
 
+    // Ownership transfer / reset
+    let ownerUpdate: {
+      tableOwnerUserId: string | null;
+      tableOwnerUsername: string | null;
+      tableLabel: string | null;
+    } | undefined;
+
+    if (actualCount === 0 && room.isDefaultTable) {
+      // Last player left a default table — reset to canonical label
+      const tableConfig = DEFAULT_TABLES.find((t) => t.mode === room.mode && t.variant === room.variant);
+      ownerUpdate = {
+        tableOwnerUserId: null,
+        tableOwnerUsername: null,
+        tableLabel: tableConfig?.label ?? room.tableLabel,
+      };
+    } else if (actualCount > 0 && room.tableOwnerUserId) {
+      // Owner may have left — check if still seated
+      const ownerStillSeated = Object.entries(hash).some(
+        ([f, uid]) => !f.includes(':') && uid === room.tableOwnerUserId,
+      );
+      if (!ownerStillSeated) {
+        // Assign earliest-seated remaining player as new owner
+        const remaining = Object.entries(hash)
+          .filter(([f]) => !f.includes(':'))
+          .sort(([a], [b]) => parseInt(a) - parseInt(b));
+        if (remaining.length > 0) {
+          const [newSeat, newOwnerId] = remaining[0];
+          const newOwnerUsername = hash[`${newSeat}:u`] ?? '';
+          ownerUpdate = {
+            tableOwnerUserId: newOwnerId,
+            tableOwnerUsername: newOwnerUsername,
+            tableLabel: `Table of ${newOwnerUsername}`,
+          };
+        }
+      }
+    }
+
     let updatedRoom: any;
     try {
       updatedRoom = await this.prisma.room.update({
         where: { id: room.id },
-        data: { currentPlayers: actualCount, status: newStatus },
+        data: { currentPlayers: actualCount, status: newStatus, ...(ownerUpdate ?? {}) },
       });
     } catch {
       return null; // deleted concurrently
@@ -356,6 +393,18 @@ export class RoomsService implements OnModuleInit {
 
     // Track which room this user is seated in (used for disconnect cleanup)
     await this.redis.set(`user:${userId}:seatRoom`, roomId, 86400);
+
+    // First player to sit becomes the table owner
+    if (occupiedEntries.length === 0) {
+      await this.prisma.room.update({
+        where: { id: roomId },
+        data: {
+          tableOwnerUserId: userId,
+          tableOwnerUsername: username,
+          tableLabel: `Table of ${username}`,
+        },
+      });
+    }
 
     // Sync DB count from actual seat state
     const updatedRoom = await this.recalculateAndSyncRoom(room) ?? room;
