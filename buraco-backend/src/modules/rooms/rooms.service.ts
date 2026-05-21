@@ -8,6 +8,7 @@ import {
 import { GameMode, GameVariant, RoomStatus } from '@prisma/client';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { EconomyService } from '../economy/economy.service';
+import { GameEngineService } from '../game-engine/game-engine.service';
 import { RedisService } from '../../common/redis/redis.service';
 import { SocketService } from '../../common/socket/socket.service';
 
@@ -40,12 +41,14 @@ export class RoomsService implements OnModuleInit {
   constructor(
     private prisma: PrismaService,
     private economyService: EconomyService,
+    private gameEngine: GameEngineService,
     private redis: RedisService,
     private socketService: SocketService,
   ) {}
 
   async onModuleInit() {
     await this.purgeStaleCustomRooms();
+    await this.purgeStaleSeats();
     await this.ensureDefaultTables();
   }
 
@@ -69,6 +72,22 @@ export class RoomsService implements OnModuleInit {
         currentPlayers: 0,
       },
     });
+  }
+
+  // On startup all WebSocket connections are gone, so every lobby seat hash is stale.
+  private async purgeStaleSeats() {
+    const lobbyRooms = await this.prisma.room.findMany({
+      where: { status: { in: [RoomStatus.EMPTY, RoomStatus.WAITING, RoomStatus.READY, RoomStatus.FULL] } },
+    });
+    await Promise.all(
+      lobbyRooms.map(async (room) => {
+        await this.redis.del(this.seatsKey(room.id));
+        await this.prisma.room.update({
+          where: { id: room.id },
+          data: { currentPlayers: 0, status: RoomStatus.EMPTY, tableOwnerUserId: null, tableOwnerUsername: null },
+        });
+      }),
+    );
   }
 
   // ── Default table management ───────────────────────────────────────────────
@@ -286,6 +305,42 @@ export class RoomsService implements OnModuleInit {
     return (await this.redis.hgetall(this.seatsKey(roomId))) ?? {};
   }
 
+  // Starts the game when a room is FULL. Uses a Redis lock so only one caller wins.
+  // Called from joinRoom (HTTP path) and gateway handleRoomJoin (WS path) — both are safe.
+  private async maybeStartGame(room: any): Promise<string | null> {
+    const lockKey = `game:starting:${room.id}`;
+    const locked = await this.redis.setNx(lockKey, '1', 30);
+    if (!locked) return null;
+
+    try {
+      const hash = (await this.redis.hgetall(this.seatsKey(room.id))) ?? {};
+      const seatOrderedIds = Object.entries(hash)
+        .filter(([f]) => !f.includes(':'))
+        .sort(([a], [b]) => parseInt(a) - parseInt(b))
+        .map(([, uid]) => uid)
+        .filter(Boolean);
+
+      if (seatOrderedIds.length < room.maxPlayers) {
+        await this.redis.del(lockKey);
+        return null;
+      }
+
+      const gameState = await this.gameEngine.startGame(room.id, room.mode, room.variant, seatOrderedIds);
+      await this.transitionToInProgress(room.id, gameState.gameId);
+
+      this.socketService.emitToRoom(`room:${room.id}`, 'room:update', {
+        roomId: room.id,
+        gameId: gameState.gameId,
+        status: 'IN_PROGRESS',
+      });
+
+      return gameState.gameId;
+    } catch (err) {
+      await this.redis.del(lockKey);
+      throw err;
+    }
+  }
+
   // ── Public API ─────────────────────────────────────────────────────────────
 
   async getRoomList() {
@@ -409,8 +464,15 @@ export class RoomsService implements OnModuleInit {
     // Sync DB count from actual seat state
     const updatedRoom = await this.recalculateAndSyncRoom(room) ?? room;
 
+    // Auto-start game when the last seat is filled — no WS event required
+    if (updatedRoom.status === RoomStatus.FULL) {
+      await this.maybeStartGame(updatedRoom).catch(() => {});
+    }
+
+    // Re-fetch so the HTTP response reflects gameId + IN_PROGRESS when game just started
+    const finalRoom = await this.prisma.room.findUnique({ where: { id: roomId } }) ?? updatedRoom;
     const teamId = assignedSeat % 2 === 0 ? 1 : 2;
-    return { ...updatedRoom, seatIndex: assignedSeat, teamId };
+    return { ...finalRoom, seatIndex: assignedSeat, teamId };
   }
 
   async switchSeat(userId: string, roomId: string, requestedSeatIndex: number) {
