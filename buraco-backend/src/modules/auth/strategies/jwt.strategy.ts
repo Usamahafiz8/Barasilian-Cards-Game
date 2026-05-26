@@ -20,10 +20,15 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
     });
   }
 
-  async validate(req: any, payload: { sub: string; email: string }) {
+  async validate(req: any, payload: { sub: string; email: string; iat: number }) {
     const token = ExtractJwt.fromAuthHeaderAsBearerToken()(req);
     const blacklisted = await this.redis.exists(`blacklist:${token}`);
     if (blacklisted) throw new UnauthorizedException('Token has been revoked');
+
+    const sessionStart = await this.redis.get(`user:session:${payload.sub}`);
+    if (sessionStart && payload.iat < parseInt(sessionStart, 10)) {
+      throw new UnauthorizedException('SESSION_SUPERSEDED');
+    }
 
     const user = await this.prisma.user.findUnique({
       where: { id: payload.sub, isDeleted: false },

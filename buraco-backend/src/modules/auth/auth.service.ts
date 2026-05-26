@@ -83,6 +83,7 @@ export class AuthService {
     const valid = await bcrypt.compare(dto.password, user.passwordHash);
     if (!valid) throw new UnauthorizedException('INVALID_CREDENTIALS');
 
+    await this.invalidateUserSessions(user.id);
     const tokens = await this.generateTokens(user.id, user.email ?? '');
     return { user: this.sanitizeUser(user), ...tokens };
   }
@@ -126,6 +127,7 @@ export class AuthService {
     }
 
     if (user.isBanned) throw new ForbiddenException('ACCOUNT_BANNED');
+    await this.invalidateUserSessions(user.id);
     const tokens = await this.generateTokens(user.id, user.email ?? '');
     return { user: this.sanitizeUser(user), ...tokens, isNewUser };
   }
@@ -173,6 +175,7 @@ export class AuthService {
     }
 
     if (user.isBanned) throw new ForbiddenException('ACCOUNT_BANNED');
+    await this.invalidateUserSessions(user.id);
     const tokens = await this.generateTokens(user.id, user.email ?? '');
     return { user: this.sanitizeUser(user), ...tokens, isNewUser };
   }
@@ -253,6 +256,12 @@ export class AuthService {
   }
 
   // ─── Private helpers ───────────────────────────────────────────────────────
+
+  private async invalidateUserSessions(userId: string) {
+    await this.prisma.refreshToken.deleteMany({ where: { userId } });
+    // 30-day TTL mirrors the refresh token lifetime
+    await this.redis.set(`user:session:${userId}`, String(Math.floor(Date.now() / 1000)), 2592000);
+  }
 
   private async generateTokens(userId: string, email: string) {
     const accessToken = this.signAccessToken(userId, email);

@@ -52,6 +52,25 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
 
     try {
       const payload = this.jwt.verify(token, { secret: this.config.get('jwt.secret') });
+
+      const sessionStart = await this.redis.get(`user:session:${payload.sub}`);
+      if (sessionStart && payload.iat < parseInt(sessionStart, 10)) {
+        socket.emit('error', { code: 'SESSION_SUPERSEDED', message: 'Logged in on another device' });
+        socket.disconnect();
+        return;
+      }
+
+      // Kick any existing socket for this user
+      const existingSocketId = this.userSockets.get(payload.sub);
+      if (existingSocketId && existingSocketId !== socket.id) {
+        const existingSockets = await this.server.fetchSockets();
+        const old = existingSockets.find((s) => s.id === existingSocketId);
+        if (old) {
+          old.emit('session:kicked', { reason: 'Logged in on another device' });
+          old.disconnect();
+        }
+      }
+
       socket.data.userId = payload.sub;
       this.userSockets.set(payload.sub, socket.id);
       await this.redis.set(`online:${payload.sub}`, '1', 30);
