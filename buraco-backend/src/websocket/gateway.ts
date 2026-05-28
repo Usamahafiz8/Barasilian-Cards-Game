@@ -92,13 +92,26 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
     // Handle in-game disconnect
     const activeGame = await this.redis.get(`user:${userId}:activeGame`);
     if (activeGame) {
-      const timeout = this.config.get<number>('game.disconnectTimeoutSeconds');
-      await this.redis.set(`disconnect:${userId}:${activeGame}`, '1', timeout);
-      socket.to(`game:${activeGame}`).emit('game:player_disconnected', {
-        gameId: activeGame,
-        playerId: userId,
-        reconnectWindowSeconds: timeout,
-      });
+      // 1v1: end the game immediately — no reconnect window makes sense with nobody left to wait
+      const abandoned = await this.gameEngine.abandonGame(activeGame, userId);
+      if (abandoned) {
+        this.server.to(`game:${activeGame}`).emit('game:end', {
+          gameId: activeGame,
+          reason: 'player_abandoned',
+          ...abandoned,
+        });
+        const sockets = await this.server.in(`game:${activeGame}`).fetchSockets();
+        await Promise.all(sockets.map((s) => this.reconnection.clearActiveGame(s.data.userId)));
+      } else {
+        // 2v2: start reconnect window as before
+        const timeout = this.config.get<number>('game.disconnectTimeoutSeconds');
+        await this.redis.set(`disconnect:${userId}:${activeGame}`, '1', timeout);
+        socket.to(`game:${activeGame}`).emit('game:player_disconnected', {
+          gameId: activeGame,
+          playerId: userId,
+          reconnectWindowSeconds: timeout,
+        });
+      }
     }
 
     // Grace period: remove player from lobby room if still offline after 15 s
