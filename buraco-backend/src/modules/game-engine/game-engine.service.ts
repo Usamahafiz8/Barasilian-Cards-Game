@@ -539,6 +539,74 @@ export class GameEngineService {
     return { winnerTeam, winnerIds, scores: teamScores, duration };
   }
 
+  // Immediately ends a 1v1 game when one player permanently disconnects.
+  // Returns null if the game is not ONE_VS_ONE or is already over.
+  async abandonGame(gameId: string, abandoningUserId: string): Promise<{ winnerTeam: number; winnerIds: string[]; scores: Record<number, number>; duration: number } | null> {
+    const state = await this.redis.getJson<GameState>(this.stateKey(gameId));
+    if (!state || state.status !== GameStatus.IN_PROGRESS) return null;
+    if (state.variant !== GameVariant.ONE_VS_ONE) return null;
+
+    const abandoner = state.players.find((p) => p.userId === abandoningUserId);
+    if (!abandoner) return null;
+
+    const winnerTeam = abandoner.teamId === 1 ? 2 : 1;
+    const winnerIds = state.players.filter((p) => p.teamId === winnerTeam).map((p) => p.userId);
+    const duration = Math.floor((Date.now() - state.gameStartedAt) / 1000);
+    const scores: Record<number, number> = { 1: 0, 2: 0 };
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.gameSession.update({
+        where: { id: gameId },
+        data: {
+          status: GameStatus.COMPLETED,
+          endedAt: new Date(),
+          winnerIds,
+          winnerTeam,
+          duration,
+          players: {
+            updateMany: state.players.map((p) => ({
+              where: { userId: p.userId },
+              data: { result: winnerIds.includes(p.userId) ? 'WIN' : 'LOSS' },
+            })),
+          },
+        },
+      });
+
+      await tx.matchRecord.create({
+        data: {
+          gameId,
+          mode: state.mode,
+          variant: state.variant,
+          winnerIds,
+          winnerTeam,
+          scores,
+          duration,
+          players: {
+            create: state.players.map((p) => ({
+              userId: p.userId,
+              teamId: p.teamId,
+              score: 0,
+              result: winnerIds.includes(p.userId) ? 'WIN' : 'LOSS',
+            })),
+          },
+        },
+      });
+    });
+
+    await Promise.all(
+      state.players.map(async (p) => {
+        const isWinner = winnerIds.includes(p.userId);
+        const reward = calculateMatchReward(0, isWinner);
+        await this.statsService.updateAfterMatch(p.userId, isWinner ? 'WIN' : 'LOSS', reward.points, reward.xp);
+        await this.economyService.distributeMatchReward(p.userId, gameId, reward.coins);
+      }),
+    );
+
+    await this.redis.del(this.stateKey(gameId));
+
+    return { winnerTeam, winnerIds, scores, duration };
+  }
+
   async handleTurnTimeout(gameId: string) {
     const state = await this.redis.getJson<GameState>(this.stateKey(gameId));
     if (!state || state.status !== GameStatus.IN_PROGRESS) return;
