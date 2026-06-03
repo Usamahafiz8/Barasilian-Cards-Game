@@ -610,30 +610,163 @@ export class GameEngineService {
   async handleTurnTimeout(gameId: string) {
     const state = await this.redis.getJson<GameState>(this.stateKey(gameId));
     if (!state || state.status !== GameStatus.IN_PROGRESS) return;
+    if (state.turnPhase === 'ROUND_ENDED') return;
 
     const playerId = state.turnOrder[state.currentTurnIndex];
     const hand = state.hands[playerId];
 
-    if (hand.length > 0) {
-      const [card] = hand.splice(0, 1);
-      state.discardPile.push(card);
+    // ── Step 1: Auto-draw if player has not drawn this turn ───────────────────
+    let drawnCard: Card | undefined;
+    if (state.turnPhase === 'MUST_DRAW') {
+      // Refill stock from discard pile when exhausted — same rule as DRAW_STOCK in processMove
+      if (state.stockPile.length === 0 && state.discardPile.length > 1) {
+        const top = state.discardPile.pop()!;
+        state.stockPile = shuffle(state.discardPile);
+        state.discardPile = [top];
+      }
+      if (state.stockPile.length > 0) {
+        drawnCard = state.stockPile.pop()!;
+        hand.push(drawnCard);
+        state.turnPhase = 'CAN_MELD_OR_DISCARD';
+
+        // Stock critically low → emit draw then finalize (same threshold as processMove)
+        if (state.stockPile.length < 2) {
+          state.moveCount++;
+          await this.redis.setJson(this.stateKey(gameId), state, 86400);
+          await this.prisma.gameMove.create({
+            data: { gameId, playerId, turnNumber: state.moveCount, moveType: MoveType.DRAW_STOCK, cardData: { auto: true, card: drawnCard as any }, isValid: true },
+          });
+          const drawMove = { type: 'TIMEOUT_DRAW', playerId, cardId: drawnCard.id };
+          this.socketService.emitToRoom(`game:${gameId}`, 'game:move_played', drawMove);
+          await this.socketService.emitPerPlayer(`game:${gameId}`, 'game:state_updated', async (uid) => ({
+            lastMove: drawMove,
+            ...this.buildClientView(state, uid),
+          }));
+          const finalResult = await this.finalizeGame(gameId, state);
+          this.socketService.emitToRoom(`game:${gameId}`, 'game:end', { gameId, ...finalResult });
+          return { playerId, autoAction: 'DRAW_THEN_FINALIZE', card: drawnCard };
+        }
+      }
+      // Stock truly empty: skip draw and proceed with unchanged hand
+    }
+
+    // ── Step 2: Pick a random legal discard ───────────────────────────────────
+    const discardIdx = this.pickLegalDiscardIndex(state, playerId, hand);
+
+    // Emit draw event before mutating state for the discard so clients animate
+    // hand+1 first, then hand after discard
+    if (drawnCard) {
+      const drawMove = { type: 'TIMEOUT_DRAW', playerId, cardId: drawnCard.id };
+      this.socketService.emitToRoom(`game:${gameId}`, 'game:move_played', drawMove);
+      await this.socketService.emitPerPlayer(`game:${gameId}`, 'game:state_updated', async (uid) => ({
+        lastMove: drawMove,
+        ...this.buildClientView(state, uid),
+      }));
+    }
+
+    if (discardIdx === -1 || hand.length === 0) {
+      // No legal discard available — advance turn without discarding
+      this.logger.warn(`Timeout: no legal discard for ${playerId} (hand=${hand.length}), advancing turn`);
       state.currentTurnIndex = (state.currentTurnIndex + 1) % state.turnOrder.length;
       state.turnStartedAt = Date.now();
       state.turnPhase = 'MUST_DRAW';
       await this.redis.setJson(this.stateKey(gameId), state, 86400);
-
-      await this.prisma.gameMove.create({
-        data: { gameId, playerId, turnNumber: state.moveCount + 1, moveType: MoveType.DISCARD, cardData: { auto: true, card: card as any }, isValid: true },
-      });
-
-      const lastMove = { type: 'TIMEOUT_DISCARD', playerId, cardId: card.id };
-      await this.socketService.emitPerPlayer(`game:${gameId}`, 'game:state_updated', async (userId) => ({
-        lastMove,
-        ...this.buildClientView(state, userId),
-      }));
-
-      return { playerId, autoAction: 'DISCARD', card };
+      if (!drawnCard) {
+        await this.socketService.emitPerPlayer(`game:${gameId}`, 'game:state_updated', async (uid) => ({
+          lastMove: { type: 'TIMEOUT_ADVANCE', playerId },
+          ...this.buildClientView(state, uid),
+        }));
+      }
+      return { playerId, autoAction: 'ADVANCE_NO_DISCARD' };
     }
+
+    // ── Step 3: Apply discard ─────────────────────────────────────────────────
+    const [discardedCard] = hand.splice(discardIdx, 1);
+    state.discardPile.push(discardedCard);
+
+    if (hand.length === 0) {
+      // Check pot auto-award first (same order as processMove DISCARD)
+      const potAward = this.tryAwardPot(state, playerId, 'DISCARD');
+      if (potAward) {
+        state.moveCount++;
+        await this.redis.setJson(this.stateKey(gameId), state, 86400);
+        await this.prisma.gameMove.create({
+          data: { gameId, playerId, turnNumber: state.moveCount, moveType: MoveType.DISCARD, cardData: { auto: true, card: discardedCard as any, potAwarded: potAward }, isValid: true },
+        });
+        const discardMove = { type: 'TIMEOUT_DISCARD', playerId, cardId: discardedCard.id, potAwarded: potAward };
+        this.socketService.emitToRoom(`game:${gameId}`, 'game:move_played', discardMove);
+        await this.socketService.emitPerPlayer(`game:${gameId}`, 'game:state_updated', async (uid) => ({
+          lastMove: discardMove,
+          ...this.buildClientView(state, uid),
+        }));
+        return { playerId, autoAction: drawnCard ? 'DRAW_THEN_DISCARD' : 'DISCARD', card: discardedCard };
+      }
+
+      // No pot — pickLegalDiscardIndex already validated close conditions
+      const playerTeamId = state.players.find((p) => p.userId === playerId)?.teamId ?? 1;
+      state.moveCount++;
+      await this.redis.setJson(this.stateKey(gameId), state, 86400);
+      await this.prisma.gameMove.create({
+        data: { gameId, playerId, turnNumber: state.moveCount, moveType: MoveType.DISCARD, cardData: { auto: true, card: discardedCard as any }, isValid: true },
+      });
+      const discardMove = { type: 'TIMEOUT_DISCARD', playerId, cardId: discardedCard.id };
+      this.socketService.emitToRoom(`game:${gameId}`, 'game:move_played', discardMove);
+      await this.socketService.emitPerPlayer(`game:${gameId}`, 'game:state_updated', async (uid) => ({
+        lastMove: discardMove,
+        ...this.buildClientView(state, uid),
+      }));
+      const finalResult = await this.finalizeGame(gameId, state, playerTeamId);
+      this.socketService.emitToRoom(`game:${gameId}`, 'game:end', { gameId, ...finalResult });
+      return { playerId, autoAction: drawnCard ? 'DRAW_THEN_DISCARD' : 'DISCARD', card: discardedCard };
+    }
+
+    // ── Step 4: Normal mid-game discard — advance turn ────────────────────────
+    state.currentTurnIndex = (state.currentTurnIndex + 1) % state.turnOrder.length;
+    state.turnStartedAt = Date.now();
+    state.turnPhase = 'MUST_DRAW';
+    state.moveCount++;
+    await this.redis.setJson(this.stateKey(gameId), state, 86400);
+    await this.prisma.gameMove.create({
+      data: { gameId, playerId, turnNumber: state.moveCount, moveType: MoveType.DISCARD, cardData: { auto: true, card: discardedCard as any }, isValid: true },
+    });
+
+    const discardMove = { type: 'TIMEOUT_DISCARD', playerId, cardId: discardedCard.id };
+    this.socketService.emitToRoom(`game:${gameId}`, 'game:move_played', discardMove);
+    await this.socketService.emitPerPlayer(`game:${gameId}`, 'game:state_updated', async (uid) => ({
+      lastMove: discardMove,
+      ...this.buildClientView(state, uid),
+    }));
+
+    return { playerId, autoAction: drawnCard ? 'DRAW_THEN_DISCARD' : 'DISCARD', card: discardedCard };
+  }
+
+  // Returns the index of a randomly chosen legal card to discard from hand.
+  // Returns -1 if no legal discard exists (e.g. only wild remains and close is invalid).
+  private pickLegalDiscardIndex(state: GameState, playerId: string, hand: Card[]): number {
+    if (hand.length === 0) return -1;
+
+    // Any card is legal to discard when it won't empty the hand (no close conditions apply)
+    if (hand.length > 1) {
+      return Math.floor(Math.random() * hand.length);
+    }
+
+    // hand.length === 1 — discarding it would attempt to close the game; validate close conditions
+    const playerTeamId = state.players.find((p) => p.userId === playerId)?.teamId ?? 1;
+    const teamCollectedPot = (state.potCollectedByTeam ?? []).includes(playerTeamId);
+
+    // tryAwardPot will handle this case if a pot is available — the discard is legal
+    const hasPotToAward = !teamCollectedPot && state.potPiles.some((p) => p.length > 0);
+    if (hasPotToAward) return 0;
+
+    const card = hand[0];
+    if (state.mode === GameMode.CLASSIC && card.isWild) return -1;
+
+    const teamPlayerIds = state.players.filter((p) => p.teamId === playerTeamId).map((p) => p.userId);
+    const teamHasBuraco = teamPlayerIds.some((uid) => hasBuraco(state.melds[uid] || []));
+    if (!teamHasBuraco) return -1;
+    if (!teamCollectedPot) return -1;
+
+    return 0;
   }
 
   // ── Toss ───────────────────────────────────────────────────────────────────
