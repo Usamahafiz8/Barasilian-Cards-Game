@@ -607,6 +607,86 @@ export class GameEngineService {
     return { winnerTeam, winnerIds, scores, duration };
   }
 
+  // Ends a game for any variant when a player intentionally resigns/exits.
+  // Works for both 1v1 and 2v2: the resigning player's team loses, the other team wins.
+  async resignGame(gameId: string, resigningUserId: string): Promise<{ winnerTeam: number; winnerIds: string[]; scores: Record<number, number>; duration: number } | null> {
+    const state = await this.redis.getJson<GameState>(this.stateKey(gameId));
+    if (!state || state.status !== GameStatus.IN_PROGRESS) return null;
+
+    const resigner = state.players.find((p) => p.userId === resigningUserId);
+    if (!resigner) return null;
+
+    const winnerTeam = resigner.teamId === 1 ? 2 : 1;
+    const winnerIds = state.players.filter((p) => p.teamId === winnerTeam).map((p) => p.userId);
+    const duration = Math.floor((Date.now() - state.gameStartedAt) / 1000);
+    const scores: Record<number, number> = { 1: 0, 2: 0 };
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.gameSession.update({
+        where: { id: gameId },
+        data: {
+          status: GameStatus.COMPLETED,
+          endedAt: new Date(),
+          winnerIds,
+          winnerTeam,
+          duration,
+          players: {
+            updateMany: state.players.map((p) => ({
+              where: { userId: p.userId },
+              data: { result: winnerIds.includes(p.userId) ? 'WIN' : 'LOSS' },
+            })),
+          },
+        },
+      });
+
+      await tx.matchRecord.create({
+        data: {
+          gameId,
+          mode: state.mode,
+          variant: state.variant,
+          winnerIds,
+          winnerTeam,
+          scores,
+          duration,
+          players: {
+            create: state.players.map((p) => ({
+              userId: p.userId,
+              teamId: p.teamId,
+              score: 0,
+              result: winnerIds.includes(p.userId) ? 'WIN' : 'LOSS',
+            })),
+          },
+        },
+      });
+    });
+
+    await Promise.all(
+      state.players.map(async (p) => {
+        const isWinner = winnerIds.includes(p.userId);
+        const reward = calculateMatchReward(0, isWinner);
+        await this.statsService.updateAfterMatch(p.userId, isWinner ? 'WIN' : 'LOSS', reward.points, reward.xp);
+        await this.economyService.distributeMatchReward(p.userId, gameId, reward.coins);
+      }),
+    );
+
+    await this.redis.del(this.stateKey(gameId));
+
+    return { winnerTeam, winnerIds, scores, duration };
+  }
+
+  async getGameResult(gameId: string) {
+    const record = await this.prisma.matchRecord.findUnique({
+      where: { gameId },
+      include: {
+        players: {
+          include: { user: { select: { username: true, avatarUrl: true } } },
+        },
+      },
+    });
+    if (!record) throw new NotFoundException('Game result not found');
+    return record;
+  }
+
   async handleTurnTimeout(gameId: string) {
     const state = await this.redis.getJson<GameState>(this.stateKey(gameId));
     if (!state || state.status !== GameStatus.IN_PROGRESS) return;

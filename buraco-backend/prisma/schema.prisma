@@ -510,6 +510,8 @@ model Room {
   minPoints      Int?
   entryFeeCoins  Int         @default(0)
   gameId         String?     @unique
+  endMode            String?
+  makart             Boolean     @default(false)
   isDefaultTable     Boolean     @default(false)
   tableLabel         String?
   tableOwnerUserId   String?

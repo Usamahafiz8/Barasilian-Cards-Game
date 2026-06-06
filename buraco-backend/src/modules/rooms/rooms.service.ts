@@ -19,6 +19,8 @@ interface CreateRoomOptions {
   entryFeeCoins?: number;
   minLevel?: number;
   minPoints?: number;
+  endMode?: string;
+  makart?: boolean;
 }
 
 interface SeatEntry {
@@ -30,10 +32,10 @@ interface SeatEntry {
 }
 
 const DEFAULT_TABLES = [
-  { mode: GameMode.CLASSIC,      variant: GameVariant.ONE_VS_ONE, label: 'Classic 1v1' },
-  { mode: GameMode.PROFESSIONAL, variant: GameVariant.ONE_VS_ONE, label: 'Professional 1v1' },
-  { mode: GameMode.CLASSIC,      variant: GameVariant.TWO_VS_TWO, label: 'Classic 2v2' },
-  { mode: GameMode.PROFESSIONAL, variant: GameVariant.TWO_VS_TWO, label: 'Professional 2v2' },
+  { mode: GameMode.CLASSIC,      variant: GameVariant.ONE_VS_ONE, label: 'Classic 1v1',       endMode: null,     makart: false },
+  { mode: GameMode.PROFESSIONAL, variant: GameVariant.ONE_VS_ONE, label: 'Professional 1v1',  endMode: 'DIRECT', makart: false },
+  { mode: GameMode.CLASSIC,      variant: GameVariant.TWO_VS_TWO, label: 'Classic 2v2',       endMode: null,     makart: false },
+  { mode: GameMode.PROFESSIONAL, variant: GameVariant.TWO_VS_TWO, label: 'Professional 2v2',  endMode: 'DIRECT', makart: false },
 ];
 
 @Injectable()
@@ -98,11 +100,11 @@ export class RoomsService implements OnModuleInit {
     if (!locked) return;
 
     for (const t of DEFAULT_TABLES) {
-      await this.seedDefaultTableIfMissing(t.mode, t.variant, t.label);
+      await this.seedDefaultTableIfMissing(t.mode, t.variant, t.label, t.endMode, t.makart);
     }
   }
 
-  private async seedDefaultTableIfMissing(mode: GameMode, variant: GameVariant, label: string) {
+  private async seedDefaultTableIfMissing(mode: GameMode, variant: GameVariant, label: string, endMode?: string | null, makart?: boolean) {
     const key = this.defaultTableKey(mode, variant);
     const existingId = await this.redis.get(key);
 
@@ -123,6 +125,8 @@ export class RoomsService implements OnModuleInit {
         currentPlayers: 0,
         isDefaultTable: true,
         tableLabel: label,
+        endMode: endMode ?? null,
+        makart: makart ?? false,
       },
     });
 
@@ -372,6 +376,7 @@ export class RoomsService implements OnModuleInit {
 
   async createRoom(userId: string, opts: CreateRoomOptions) {
     const maxPlayers = opts.variant === GameVariant.ONE_VS_ONE ? 2 : 4;
+    const isProfessional = opts.mode === GameMode.PROFESSIONAL;
     const room = await this.prisma.room.create({
       data: {
         mode: opts.mode,
@@ -384,6 +389,8 @@ export class RoomsService implements OnModuleInit {
         status: RoomStatus.EMPTY,
         currentPlayers: 0,
         isDefaultTable: false,
+        endMode: isProfessional ? (opts.endMode ?? null) : null,
+        makart: isProfessional ? (opts.makart ?? false) : false,
       },
     });
     // Creator always gets seat 0 (team 1)
@@ -562,7 +569,7 @@ export class RoomsService implements OnModuleInit {
       );
       const label = tableConfig?.label ?? updatedRoom.tableLabel ?? '';
       await this.redis.del(this.defaultTableKey(updatedRoom.mode, updatedRoom.variant));
-      await this.seedDefaultTableIfMissing(updatedRoom.mode, updatedRoom.variant, label);
+      await this.seedDefaultTableIfMissing(updatedRoom.mode, updatedRoom.variant, label, tableConfig?.endMode, tableConfig?.makart);
     }
 
     const enriched = await this.enrichRoomWithSeats(updatedRoom);

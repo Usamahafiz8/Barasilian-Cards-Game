@@ -40,6 +40,8 @@ export class RoomsController {
         entryFeeCoins: { type: 'number', description: 'Entry fee in coins (default 0)' },
         minLevel:      { type: 'number', description: 'Minimum player level to join' },
         minPoints:     { type: 'number', description: 'Minimum ranking points to join' },
+        endMode:       { type: 'string', enum: ['DIRECT', 'INDIRECT'], description: 'Professional only: end mode' },
+        makart:        { type: 'boolean', description: 'Professional only: enable Makart rules' },
       },
       required: ['mode', 'variant'],
     },

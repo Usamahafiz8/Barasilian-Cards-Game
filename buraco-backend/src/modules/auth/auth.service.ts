@@ -73,11 +73,30 @@ export class AuthService {
   }
 
   async login(dto: LoginDto) {
-    const user = await this.prisma.user.findUnique({
-      where: { email: dto.email, isDeleted: false },
-    });
+    const emailProvided = !!dto.email?.trim();
+    const usernameProvided = !!dto.username?.trim();
 
-    if (!user || !user.passwordHash) throw new UnauthorizedException('INVALID_CREDENTIALS');
+    if (!emailProvided && !usernameProvided) {
+      throw new BadRequestException('EMAIL_OR_USERNAME_REQUIRED');
+    }
+
+    let user: any;
+
+    if (emailProvided) {
+      user = await this.prisma.user.findUnique({
+        where: { email: dto.email, isDeleted: false },
+      });
+    } else {
+      user = await this.prisma.user.findFirst({
+        where: {
+          username: { equals: dto.username, mode: 'insensitive' },
+          isDeleted: false,
+        },
+      });
+    }
+
+    if (!user) throw new NotFoundException('ACCOUNT_NOT_FOUND');
+    if (!user.passwordHash) throw new UnauthorizedException('INVALID_CREDENTIALS');
     if (user.isBanned) throw new ForbiddenException('ACCOUNT_BANNED');
 
     const valid = await bcrypt.compare(dto.password, user.passwordHash);

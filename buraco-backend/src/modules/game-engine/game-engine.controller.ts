@@ -18,6 +18,12 @@ export class GameEngineController {
     return this.gameEngineService.getGameState(gameId, userId);
   }
 
+  @Get(':gameId/result')
+  @ApiOperation({ summary: 'Get final match result and per-player scores' })
+  getResult(@Param('gameId') gameId: string) {
+    return this.gameEngineService.getGameResult(gameId);
+  }
+
   @Post(':gameId/move/draw')
   @ApiOperation({ summary: 'Draw a card from stock or discard pile' })
   draw(@Param('gameId') gameId: string, @CurrentUser('id') userId: string, @Body('source') source: 'STOCK' | 'DISCARD') {

@@ -397,6 +397,25 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
     }
   }
 
+  @SubscribeMessage('game:leave')
+  async handleGameLeave(@ConnectedSocket() socket: Socket, @MessageBody() data: { gameId?: string }) {
+    const userId = socket.data.userId;
+    const gameId = data?.gameId ?? await this.redis.get(`user:${userId}:activeGame`);
+    if (!gameId) return;
+
+    const result = await this.gameEngine.resignGame(gameId, userId);
+    if (!result) return;
+
+    this.server.to(`game:${gameId}`).emit('game:end', {
+      gameId,
+      reason: 'resigned',
+      ...result,
+    });
+
+    const sockets = await this.server.in(`game:${gameId}`).fetchSockets();
+    await Promise.all(sockets.map((s) => this.reconnection.clearActiveGame(s.data.userId)));
+  }
+
   // ─── Chat ─────────────────────────────────────────────────────────────────
 
   @SubscribeMessage('chat:send')
