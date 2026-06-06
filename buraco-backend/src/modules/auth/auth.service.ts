@@ -58,7 +58,7 @@ export class AuthService {
         data: {
           email: dto.email,
           passwordHash,
-          username: dto.username,
+          username: dto.username.toLowerCase(),
           coins,
           diamonds,
           lives,
@@ -83,16 +83,14 @@ export class AuthService {
     let user: any;
 
     if (emailProvided) {
-      user = await this.prisma.user.findUnique({
+      user = await this.prisma.user.findFirst({
         where: { email: dto.email, isDeleted: false },
       });
     } else {
-      user = await this.prisma.user.findFirst({
-        where: {
-          username: { equals: dto.username, mode: 'insensitive' },
-          isDeleted: false,
-        },
+      user = await this.prisma.user.findUnique({
+        where: { username: dto.username!.toLowerCase() },
       });
+      if (user?.isDeleted) user = null;
     }
 
     if (!user) throw new NotFoundException('ACCOUNT_NOT_FOUND');
@@ -278,8 +276,12 @@ export class AuthService {
 
   private async invalidateUserSessions(userId: string) {
     await this.prisma.refreshToken.deleteMany({ where: { userId } });
-    // 30-day TTL mirrors the refresh token lifetime
-    await this.redis.set(`user:session:${userId}`, String(Math.floor(Date.now() / 1000)), 2592000);
+    try {
+      // 30-day TTL mirrors the refresh token lifetime
+      await this.redis.set(`user:session:${userId}`, String(Math.floor(Date.now() / 1000)), 2592000);
+    } catch (err) {
+      console.error('[Auth] Redis session fence write failed — login continues:', err);
+    }
   }
 
   private async generateTokens(userId: string, email: string) {
@@ -318,7 +320,7 @@ export class AuthService {
   }
 
   private async generateUsername(base: string): Promise<string> {
-    const clean = base.replace(/[^a-zA-Z0-9_]/g, '').slice(0, 15) || 'Player';
+    const clean = base.replace(/[^a-zA-Z0-9_]/g, '').toLowerCase().slice(0, 15) || 'player';
     let candidate = clean;
     let attempt = 0;
     while (await this.prisma.user.findUnique({ where: { username: candidate } })) {
