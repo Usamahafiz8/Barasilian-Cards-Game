@@ -321,13 +321,28 @@ export class GameEngineService {
         state.turnPhase = 'CAN_MELD_OR_DISCARD';
         result = { card, handCount: hand.length, stockPileCount: state.stockPile.length };
 
-        // Classic: ≤ 2 cards remaining (DeckStopClassic = 2); Professional: 0 cards remaining
-        const stockLow = state.mode === GameMode.CLASSIC
-          ? state.stockPile.length <= 2
-          : state.stockPile.length === 0;
-        if (stockLow) {
-          await this.redis.setJson(this.stateKey(gameId), state, 86400);
-          return this.finalizeGame(gameId, state);
+        if (state.mode === GameMode.CLASSIC) {
+          // Classic: end the round when ≤ 2 cards remain (no pot refill)
+          if (state.stockPile.length <= 2) {
+            await this.redis.setJson(this.stateKey(gameId), state, 86400);
+            return this.finalizeGame(gameId, state);
+          }
+        } else {
+          // Professional: when stock empties, pour untaken pots (A then B) into the stock
+          // and continue. End only when stock AND all remaining pots are exhausted.
+          if (state.stockPile.length === 0) {
+            const potIdx = state.potPiles.findIndex(p => p.length > 0);
+            if (potIdx !== -1) {
+              state.stockPile = shuffle(state.potPiles[potIdx]);
+              state.potPiles[potIdx] = [];
+              result.stockPileCount = state.stockPile.length;
+              result.potRefilled = true;
+            } else {
+              // Stock empty, no pots left — end the round
+              await this.redis.setJson(this.stateKey(gameId), state, 86400);
+              return this.finalizeGame(gameId, state);
+            }
+          }
         }
         break;
       }
@@ -1007,10 +1022,23 @@ export class GameEngineService {
         hand.push(drawnCard);
         state.turnPhase = 'CAN_MELD_OR_DISCARD';
 
-        const stockLow = state.mode === GameMode.CLASSIC
-          ? state.stockPile.length <= 2
-          : state.stockPile.length === 0;
-        if (stockLow) {
+        let shouldFinalize = false;
+        if (state.mode === GameMode.CLASSIC) {
+          shouldFinalize = state.stockPile.length <= 2;
+        } else {
+          // Professional: refill stock from next untaken pot before finalizing
+          if (state.stockPile.length === 0) {
+            const potIdx = state.potPiles.findIndex(p => p.length > 0);
+            if (potIdx !== -1) {
+              state.stockPile = shuffle(state.potPiles[potIdx]);
+              state.potPiles[potIdx] = [];
+            } else {
+              shouldFinalize = true;
+            }
+          }
+        }
+
+        if (shouldFinalize) {
           state.moveCount++;
           await this.redis.setJson(this.stateKey(gameId), state, 86400);
           await this.prisma.gameMove.create({
