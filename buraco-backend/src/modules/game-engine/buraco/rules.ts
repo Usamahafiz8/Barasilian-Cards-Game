@@ -9,15 +9,66 @@ export interface Meld {
   cards: Card[];
   isNatural: boolean;
   isCanasta: boolean;
+  /** Professional mode: once a meld is dirty it stays dirty even if wild later moves to a natural position. */
+  everDirty?: boolean;
 }
+
+/**
+ * Checks whether a 2 card, treated as a natural rank-2 card, fits in the run formed
+ * by `runCards`.  A 2 is "natural" when rank-2 is a genuine member of the sequence
+ * (i.e., the run contains a rank-3 card and, after treating the 2 as rank 2,
+ * the whole range from min-rank down to 2 is consecutive with zero acting wilds).
+ */
+export function hasNaturalTwoInRun(cards: Card[]): boolean {
+  const twos    = cards.filter(c => c.rank === '2');
+  const jokers  = cards.filter(c => c.rank === 'JOKER');
+  if (twos.length === 0 || jokers.length > 0) return false; // jokers in the run → can't co-exist with natural-2 classification
+
+  const naturals = cards.filter(c => c.rank !== '2' && c.rank !== 'JOKER');
+  if (naturals.length === 0) return false;
+
+  // Try treating the first 2 as a rank-2 natural card
+  const withNaturalTwo = [...naturals, twos[0]];
+  const remainingWilds = twos.length - 1; // other 2s remain acting wilds
+  if (remainingWilds > 1) return false; // can only have 1 acting wild total
+
+  if (!isValidRun(withNaturalTwo, remainingWilds)) return false;
+
+  // Confirm rank-3 is present: without rank-3, rank-2 wouldn't be a "natural" consecutive member
+  const ranks = withNaturalTwo.map(c => (c.rank === 'A' ? 1 : rankOrder(c.rank)));
+  return ranks.includes(3);
+}
+
+/**
+ * Returns true if the meld contains any wild card that is acting as a substitute
+ * (i.e. filling a gap or extending the run at a non-rank-2 position).
+ * For SETs, any wild is always acting.
+ * For RUNs, a 2 in its natural rank-2 position is NOT acting.
+ */
+export function computeMeldHasActingWild(cards: Card[], type: MeldType): boolean {
+  if (type === 'SET') return cards.some(c => c.isWild);
+
+  // RUN
+  const jokers = cards.filter(c => c.rank === 'JOKER');
+  const twos   = cards.filter(c => c.rank === '2');
+  if (jokers.length > 0) return true; // any joker in a run is always acting
+  if (twos.length === 0) return false;
+
+  const naturalTwos = hasNaturalTwoInRun(cards) ? 1 : 0;
+  return twos.length > naturalTwos;
+}
+
+// ── Public validation ─────────────────────────────────────────────────────────
 
 /**
  * Validates a meld and returns its type.
  *
- * SET rules:  all naturals same rank, max 1 wild (any kind), at least 1 natural.
- * RUN rules:  all naturals same suit, consecutive (gaps filled by wilds), max 1 wild.
- *   Classic:     any wild (Joker or 2) may fill a gap.
- *   Professional: only a 2 may fill a run gap — Jokers are barred from runs.
+ * SET rules:  all naturals same rank, max 1 acting wild, at least 1 natural.
+ *             Professional special: all-2 SET (Buraco of 2) is valid.
+ * RUN rules:  all non-joker cards same suit, consecutive ranks.
+ *             Classic:      any single wild (Joker or 2) may fill a gap.
+ *             Professional: only a 2 may fill a gap; Jokers barred.
+ *                           Two 2s allowed when one is natural (rank-2 position).
  */
 export function validateMeld(
   cards: Card[],
@@ -25,10 +76,17 @@ export function validateMeld(
 ): { valid: boolean; type?: MeldType; reason?: string } {
   if (cards.length < 3) return { valid: false, reason: 'A meld must have at least 3 cards' };
 
-  const naturals = cards.filter((c) => !c.isWild);
-  const wilds = cards.filter((c) => c.isWild);
+  // Professional special: all-2 meld (treated as natural rank-2 cards — Buraco of 2 path)
+  if (mode === 'PROFESSIONAL' && cards.every(c => c.rank === '2')) {
+    return { valid: true, type: 'SET' };
+  }
 
-  if (naturals.length === 0) return { valid: false, reason: 'A meld must have at least one natural card' };
+  const naturals = cards.filter(c => !c.isWild);
+  const wilds    = cards.filter(c => c.isWild);
+
+  if (naturals.length === 0) {
+    return { valid: false, reason: 'A meld must have at least one natural card' };
+  }
 
   // ── SET ──────────────────────────────────────────────────────────────────
   if (wilds.length <= 1 && isValidSet(naturals)) {
@@ -36,29 +94,48 @@ export function validateMeld(
   }
 
   // ── RUN ──────────────────────────────────────────────────────────────────
-  // Professional: Jokers cannot fill runs; only a 2 may.
   if (mode === 'PROFESSIONAL') {
-    if (wilds.some((c) => c.rank === 'JOKER')) {
+    if (wilds.some(c => c.rank === 'JOKER')) {
       return { valid: false, reason: 'Jokers cannot fill runs in Professional mode' };
     }
-    const twos = wilds.filter((c) => c.rank === '2');
-    if (twos.length > 1) {
-      return { valid: false, reason: 'A run can contain at most one 2 in Professional mode' };
+    const twos = wilds.filter(c => c.rank === '2');
+    // Allow at most 1 acting-wild-2 (but one 2 may be natural at rank-2 position)
+    if (twos.length > 2) {
+      return { valid: false, reason: 'A run can contain at most two 2s (one natural + one wild)' };
     }
-    if (isValidRun(naturals, twos.length)) return { valid: true, type: 'RUN' };
+    if (twos.length <= 1) {
+      if (isValidRun(naturals, twos.length)) return { valid: true, type: 'RUN' };
+    } else {
+      // Two 2s: one must be natural (rank-2 slot) and one is the acting wild
+      // Try: treat one 2 as natural card (add it to naturals, use 1 acting wild for the other)
+      const withNatural = [...naturals, twos[0]]; // twos[0] as rank-2 natural
+      if (isValidRun(withNatural, 1)) {
+        const ranks = withNatural.map(c => (c.rank === 'A' ? 1 : rankOrder(c.rank)));
+        if (ranks.includes(3)) return { valid: true, type: 'RUN' };
+      }
+      // Symmetry check with twos[1]
+      const withNatural2 = [...naturals, twos[1]];
+      if (isValidRun(withNatural2, 1)) {
+        const ranks2 = withNatural2.map(c => (c.rank === 'A' ? 1 : rankOrder(c.rank)));
+        if (ranks2.includes(3)) return { valid: true, type: 'RUN' };
+      }
+      return { valid: false, reason: 'Two 2s in a run require one to be in the natural rank-2 position' };
+    }
   } else {
     // Classic: any single wild allowed
-    if (wilds.length > 1) return { valid: false, reason: 'A meld can contain at most one wild card' };
+    if (wilds.length > 1) {
+      return { valid: false, reason: 'A meld can contain at most one wild card' };
+    }
     if (isValidRun(naturals, wilds.length)) return { valid: true, type: 'RUN' };
   }
 
   return { valid: false, reason: 'Cards do not form a valid set or run' };
 }
 
-// ── Internal validators ───────────────────────────────────────────────────
+// ── Internal validators ───────────────────────────────────────────────────────
 
 function isValidSet(naturals: Card[]): boolean {
-  const ranks = naturals.map((c) => c.rank);
+  const ranks = naturals.map(c => c.rank);
   return new Set(ranks).size === 1;
 }
 
@@ -69,19 +146,16 @@ function isValidSet(naturals: Card[]): boolean {
  */
 function isValidRun(naturals: Card[], wildCount: number): boolean {
   if (naturals.length === 0) return false;
-  const suits = new Set(naturals.map((c) => c.suit));
+  const suits = new Set(naturals.map(c => c.suit));
   if (suits.size > 1) return false;
 
-  const ranks = naturals.map((c) => rankOrder(c.rank));
-
+  const ranks = naturals.map(c => rankOrder(c.rank));
   if (fitsWithWilds(ranks, wildCount)) return true;
 
-  // Retry with Ace as high (14)
-  if (naturals.some((c) => c.rank === 'A')) {
-    const highRanks = ranks.map((r) => (r === 1 ? 14 : r));
+  if (naturals.some(c => c.rank === 'A')) {
+    const highRanks = ranks.map(r => (r === 1 ? 14 : r));
     if (fitsWithWilds(highRanks, wildCount)) return true;
   }
-
   return false;
 }
 
@@ -97,7 +171,7 @@ function fitsWithWilds(ranks: number[], wildCount: number): boolean {
   return gaps <= wildCount;
 }
 
-// ── Card sort ─────────────────────────────────────────────────────────────
+// ── Card sort ─────────────────────────────────────────────────────────────────
 
 /**
  * Returns meld cards in logical display order:
@@ -110,28 +184,25 @@ export function sortMeldCards(cards: Card[], type: MeldType): Card[] {
 }
 
 function sortSetCards(cards: Card[]): Card[] {
-  return [...cards.filter((c) => !c.isWild), ...cards.filter((c) => c.isWild)];
+  return [...cards.filter(c => !c.isWild), ...cards.filter(c => c.isWild)];
 }
 
 function shouldAceBeHigh(naturals: Card[]): boolean {
-  if (!naturals.some((c) => c.rank === 'A')) return false;
-  // If any other natural is a high card (10–K), treat Ace as high (14).
-  return naturals.some((c) => c.rank !== 'A' && rankOrder(c.rank) >= 10);
+  if (!naturals.some(c => c.rank === 'A')) return false;
+  return naturals.some(c => c.rank !== 'A' && rankOrder(c.rank) >= 10);
 }
 
 function sortRunCards(cards: Card[]): Card[] {
-  const naturals = cards.filter((c) => !c.isWild);
-  const wilds = cards.filter((c) => c.isWild);
+  const naturals = cards.filter(c => !c.isWild);
+  const wilds    = cards.filter(c => c.isWild);
 
   const aceHigh = shouldAceBeHigh(naturals);
-  const rank = (c: Card) => (aceHigh && c.rank === 'A' ? 14 : rankOrder(c.rank));
+  const rank    = (c: Card) => (aceHigh && c.rank === 'A' ? 14 : rankOrder(c.rank));
 
-  // Sort naturals high → low
   const sorted = [...naturals].sort((a, b) => rank(b) - rank(a));
 
   if (wilds.length === 0) return sorted;
 
-  // Place the single wild at the first internal gap found
   for (let i = 0; i < sorted.length - 1; i++) {
     if (rank(sorted[i]) - rank(sorted[i + 1]) > 1) {
       return [...sorted.slice(0, i + 1), wilds[0], ...sorted.slice(i + 1)];
@@ -142,20 +213,38 @@ function sortRunCards(cards: Card[]): Card[] {
   return [...sorted, wilds[0]];
 }
 
-// ── Public helpers ────────────────────────────────────────────────────────
+// ── Public helpers ────────────────────────────────────────────────────────────
 
 /**
  * Returns true if `newCards` can legally be added to `meld`.
- * The combined result must be valid AND preserve the meld's original type.
  */
 export function canAddToMeld(meld: Meld, newCards: Card[], mode: string = 'CLASSIC'): boolean {
   const combined = [...meld.cards, ...newCards];
-  const result = validateMeld(combined, mode);
+  const result   = validateMeld(combined, mode);
   return result.valid && result.type === meld.type;
 }
 
+/**
+ * Finds the first existing team meld that the played cards can be merged into.
+ * Returns the meld if found, or null if a new meld should be created instead.
+ */
+export function tryFindMergeTarget(
+  playedCards: Card[],
+  meldType: MeldType,
+  teamMelds: Meld[],
+  mode: string,
+): Meld | null {
+  for (const existing of teamMelds) {
+    if (existing.type !== meldType) continue;
+    const combined = [...existing.cards, ...playedCards];
+    const result   = validateMeld(combined, mode);
+    if (result.valid && result.type === meldType) return existing;
+  }
+  return null;
+}
+
 export function canPickupDiscardPile(topCard: Card, hand: Card[]): boolean {
-  const naturalsInHand = hand.filter((c) => !c.isWild);
+  const naturalsInHand = hand.filter(c => !c.isWild);
   for (const c1 of naturalsInHand) {
     for (const c2 of naturalsInHand) {
       if (c1.id === c2.id) continue;
@@ -170,7 +259,12 @@ export function canPickupPot(hand: Card[]): boolean {
 }
 
 export function hasBuraco(melds: Meld[]): boolean {
-  return melds.some((m) => m.cards.length >= 7);
+  return melds.some(m => m.cards.length >= 7);
+}
+
+/** Professional only: a Buraco formed entirely of rank-2 cards triggers an immediate win. */
+export function hasBuracoOfTwos(melds: Meld[]): boolean {
+  return melds.some(m => m.cards.length >= 7 && m.cards.every(c => c.rank === '2'));
 }
 
 export function isCanasta(meld: Meld): boolean {
@@ -178,5 +272,5 @@ export function isCanasta(meld: Meld): boolean {
 }
 
 export function isNaturalCanasta(meld: Meld): boolean {
-  return isCanasta(meld) && meld.cards.every((c) => !c.isWild);
+  return isCanasta(meld) && meld.cards.every(c => !c.isWild);
 }

@@ -7,7 +7,18 @@ import { RedisService } from '../../common/redis/redis.service';
 import { EconomyService } from '../economy/economy.service';
 import { StatsService } from '../stats/stats.service';
 import { generateDeck, shuffle, Card, tossRankValue } from './buraco/deck';
-import { validateMeld, canAddToMeld, canPickupDiscardPile, canPickupPot, hasBuraco, sortMeldCards, Meld } from './buraco/rules';
+import {
+  validateMeld,
+  canAddToMeld,
+  canPickupDiscardPile,
+  canPickupPot,
+  hasBuraco,
+  hasBuracoOfTwos,
+  tryFindMergeTarget,
+  sortMeldCards,
+  computeMeldHasActingWild,
+  Meld,
+} from './buraco/rules';
 import { calculateScore, calculateMatchReward } from './buraco/scoring';
 import { SocketService } from '../../common/socket/socket.service';
 
@@ -33,7 +44,7 @@ export interface TossResult {
   rounds: TossRound[];
   winnerPlayerId: string;
   winnerSeatIndex: number;
-  players: TossEntry[]; // final round entries
+  players: TossEntry[];
   reason: string;
 }
 
@@ -41,6 +52,10 @@ export interface GameState {
   gameId: string;
   mode: GameMode;
   variant: GameVariant;
+  /** Professional Direct = hand empties on-the-fly to close; Indirect = must discard last card. */
+  endMode: 'DIRECT' | 'INDIRECT';
+  /** Professional MAKART: player with 1 card in hand cannot take discard when pile also has 1 card. */
+  makart: boolean;
   status: GameStatus;
   stockPile: Card[];
   discardPile: Card[];
@@ -58,10 +73,13 @@ export interface GameState {
   round: number;
   scores: Record<number, number>;
   moveCount: number;
+  /**
+   * Array of team IDs that have collected a pot; duplicates allowed (team appearing twice = took 2 pots).
+   * Classic: max 1 per team. Professional: max 2 per team.
+   */
   potCollectedByTeam: number[];
-  // ── Setup / toss ─────────────────────────────────────────
-  seatMap: Record<string, number>;      // userId → stable seatIndex
-  usernames: Record<string, string>;    // userId → username
+  seatMap: Record<string, number>;
+  usernames: Record<string, string>;
   toss: TossResult | null;
   setupComplete: boolean;
   tossComplete: boolean;
@@ -101,7 +119,14 @@ export class GameEngineService {
     return `game:${gameId}:state`;
   }
 
-  async startGame(roomId: string, mode: GameMode, variant: GameVariant, playerIds: string[]): Promise<GameState> {
+  async startGame(
+    roomId: string,
+    mode: GameMode,
+    variant: GameVariant,
+    playerIds: string[],
+    endMode?: string | null,
+    makart?: boolean,
+  ): Promise<GameState> {
     const game = await this.prisma.gameSession.create({
       data: {
         roomId,
@@ -121,9 +146,8 @@ export class GameEngineService {
     });
 
     const dbPlayers = game.players;
-    const dbUserIds = dbPlayers.map((p) => p.userId);
+    const dbUserIds = dbPlayers.map(p => p.userId);
 
-    // Fetch usernames in one query
     const users = await this.prisma.user.findMany({
       where: { id: { in: dbUserIds } },
       select: { id: true, username: true },
@@ -131,14 +155,11 @@ export class GameEngineService {
     const usernames: Record<string, string> = {};
     for (const u of users) usernames[u.id] = u.username;
 
-    // Stable seat indices — order from DB
     const seatMap: Record<string, number> = {};
     dbPlayers.forEach((p, i) => { seatMap[p.userId] = i; });
 
-    // Run toss to determine who goes first
     const tossResult = this.runToss(dbUserIds, seatMap);
 
-    // Deal cards
     const deck = shuffle(generateDeck(mode !== GameMode.PROFESSIONAL));
     const hands: Record<string, Card[]> = {};
     const potPiles: Card[][] = [[], []];
@@ -155,25 +176,26 @@ export class GameEngineService {
     const topCard = stockPile.pop();
     const discardPile: Card[] = topCard ? [topCard] : [];
 
-    // Turn order: clockwise from toss winner's seat
     const winnerSeat = seatMap[tossResult.winnerPlayerId] ?? 0;
-    const turnOrder = [
-      ...dbUserIds.slice(winnerSeat),
-      ...dbUserIds.slice(0, winnerSeat),
-    ];
-    const players = dbPlayers.map((p) => ({ userId: p.userId, teamId: p.teamId, isConnected: true }));
+    const turnOrder = [...dbUserIds.slice(winnerSeat), ...dbUserIds.slice(0, winnerSeat)];
+    const players = dbPlayers.map(p => ({ userId: p.userId, teamId: p.teamId, isConnected: true }));
     const now = Date.now();
+
+    const resolvedEndMode: 'DIRECT' | 'INDIRECT' =
+      (endMode === 'DIRECT' ? 'DIRECT' : 'INDIRECT');
 
     const state: GameState = {
       gameId: game.id,
       mode,
       variant,
+      endMode: resolvedEndMode,
+      makart: !!makart,
       status: GameStatus.IN_PROGRESS,
       stockPile,
       discardPile,
       potPiles,
       hands,
-      melds: Object.fromEntries(dbUserIds.map((id) => [id, []])),
+      melds: Object.fromEntries(dbUserIds.map(id => [id, []])),
       teamMelds: { 1: [], 2: [] },
       players,
       turnOrder,
@@ -203,13 +225,9 @@ export class GameEngineService {
     return this.buildClientView(state, requestingUserId);
   }
 
-  /**
-   * Builds the per-player client view emitted by every game event.
-   * Includes stable seatIndex, username, toss metadata, and setup flags.
-   */
   private buildClientView(state: GameState, requestingUserId: string) {
     const currentPlayerId = state.turnOrder[state.currentTurnIndex] ?? '';
-    const topDiscardCard = state.discardPile.length > 0
+    const topDiscardCard  = state.discardPile.length > 0
       ? state.discardPile[state.discardPile.length - 1]
       : null;
 
@@ -217,7 +235,6 @@ export class GameEngineService {
       (a, b) => (state.seatMap?.[a.userId] ?? 0) - (state.seatMap?.[b.userId] ?? 0),
     );
 
-    // Aggregate per-player melds into team meld panels — computed fresh each view
     const teamMelds: Record<number, Meld[]> = {};
     for (const p of state.players) {
       if (!teamMelds[p.teamId]) teamMelds[p.teamId] = [];
@@ -226,49 +243,55 @@ export class GameEngineService {
       }
     }
 
-    const requestingTeamId = state.players.find((p) => p.userId === requestingUserId)?.teamId;
+    const requestingTeamId = state.players.find(p => p.userId === requestingUserId)?.teamId;
 
-    const players = sortedPlayers.map((p) => ({
-      id: p.userId,
-      userId: p.userId,
-      username: state.usernames?.[p.userId] ?? '',
-      teamId: p.teamId,
+    const players = sortedPlayers.map(p => ({
+      id:          p.userId,
+      userId:      p.userId,
+      username:    state.usernames?.[p.userId] ?? '',
+      teamId:      p.teamId,
       isConnected: p.isConnected,
-      seatIndex: state.seatMap?.[p.userId] ?? 0,
-      handCount: (state.hands[p.userId] || []).length,
+      seatIndex:   state.seatMap?.[p.userId] ?? 0,
+      handCount:   (state.hands[p.userId] || []).length,
     }));
 
     return {
-      gameId: state.gameId,
-      mode: state.mode,
-      variant: state.variant,
-      status: state.status,
+      gameId:               state.gameId,
+      mode:                 state.mode,
+      variant:              state.variant,
+      endMode:              state.endMode ?? 'INDIRECT',
+      makart:               state.makart ?? false,
+      status:               state.status,
       currentPlayerId,
-      turnPhase: state.turnPhase ?? 'MUST_DRAW',
-      stockPileCount: state.stockPile.length,
-      discardPile: state.discardPile,
+      turnPhase:            state.turnPhase ?? 'MUST_DRAW',
+      stockPileCount:       state.stockPile.length,
+      discardPile:          state.discardPile,
       topDiscardCard,
-      discardPileCount: state.discardPile.length,
-      potPileCounts: state.potPiles.map((p) => p.length),
+      discardPileCount:     state.discardPile.length,
+      potPileCounts:        state.potPiles.map(p => p.length),
       players,
-      myHand: state.hands[requestingUserId] || [],
-      myMelds: requestingTeamId !== undefined ? (teamMelds[requestingTeamId] || []) : [],
+      myHand:               state.hands[requestingUserId] || [],
+      myMelds:              requestingTeamId !== undefined ? (teamMelds[requestingTeamId] || []) : [],
       teamMelds,
-      turnOrder: state.turnOrder,
-      currentTurnIndex: state.currentTurnIndex,
-      turnStartedAt: state.turnStartedAt,
-      turnDuration: state.turnDuration,
-      round: state.round,
-      scores: state.scores,
-      moveCount: state.moveCount,
-      potCollectedByTeam: state.potCollectedByTeam ?? [],
-      setupComplete: state.setupComplete ?? true,
-      tossComplete: state.tossComplete ?? true,
-      toss: state.toss ?? null,
+      turnOrder:            state.turnOrder,
+      currentTurnIndex:     state.currentTurnIndex,
+      turnStartedAt:        state.turnStartedAt,
+      turnDuration:         state.turnDuration,
+      round:                state.round,
+      scores:               state.scores,
+      moveCount:            state.moveCount,
+      potCollectedByTeam:   state.potCollectedByTeam ?? [],
+      setupComplete:        state.setupComplete ?? true,
+      tossComplete:         state.tossComplete ?? true,
+      toss:                 state.toss ?? null,
     };
   }
 
-  async processMove(gameId: string, playerId: string, move: { type: MoveType; cardIds?: string[]; meldId?: string; source?: 'STOCK' | 'DISCARD' }) {
+  async processMove(
+    gameId: string,
+    playerId: string,
+    move: { type: MoveType; cardIds?: string[]; meldId?: string; source?: 'STOCK' | 'DISCARD' },
+  ) {
     const state = await this.redis.getJson<GameState>(this.stateKey(gameId));
     if (!state) throw new NotFoundException('Game not found');
     if (state.status !== GameStatus.IN_PROGRESS) throw new BadRequestException('GAME_NOT_IN_PROGRESS');
@@ -278,9 +301,13 @@ export class GameEngineService {
 
     const turnPhase: TurnPhase = state.turnPhase ?? 'MUST_DRAW';
     const hand = state.hands[playerId];
+    const playerTeamId = state.players.find(p => p.userId === playerId)?.teamId ?? 1;
+    const teamPlayerIds = state.players.filter(p => p.teamId === playerTeamId).map(p => p.userId);
     let result: any = {};
 
     switch (move.type) {
+
+      // ────────────────────────────────────────────────────────────────────────
       case MoveType.DRAW_STOCK: {
         if (turnPhase !== 'MUST_DRAW') throw new BadRequestException('WRONG_PHASE');
         if (state.stockPile.length === 0) {
@@ -294,52 +321,155 @@ export class GameEngineService {
         state.turnPhase = 'CAN_MELD_OR_DISCARD';
         result = { card, handCount: hand.length, stockPileCount: state.stockPile.length };
 
-        if (state.stockPile.length < 2) {
+        // Classic: ≤ 2 cards left; Professional: 0 cards left
+        const stockLow = state.mode === GameMode.CLASSIC
+          ? state.stockPile.length < 2
+          : state.stockPile.length === 0;
+        if (stockLow) {
           await this.redis.setJson(this.stateKey(gameId), state, 86400);
           return this.finalizeGame(gameId, state);
         }
         break;
       }
 
+      // ────────────────────────────────────────────────────────────────────────
       case MoveType.DRAW_DISCARD: {
         if (turnPhase !== 'MUST_DRAW') throw new BadRequestException('WRONG_PHASE');
         if (state.discardPile.length === 0) throw new BadRequestException('EMPTY_DISCARD');
+
+        // MAKART option (Professional): player with 1 card cannot take discard when pile has 1 card
+        if (state.makart && hand.length === 1 && state.discardPile.length === 1) {
+          throw new BadRequestException('MAKART: must draw from stock when both hand and discard have 1 card');
+        }
+
         const topCard = state.discardPile[state.discardPile.length - 1];
         if (state.mode !== GameMode.CLASSIC && !canPickupDiscardPile(topCard, hand)) {
-          throw new BadRequestException('Cannot pick up discard pile');
+          throw new BadRequestException('Cannot pick up discard pile: need 2 naturals that form a meld with the top card');
         }
         const takenCards = [...state.discardPile];
         hand.push(...takenCards);
         state.discardPile = [];
         state.turnPhase = 'CAN_MELD_OR_DISCARD';
-        result = { takenCount: takenCards.length, takenCardIds: takenCards.map((c) => c.id), handCount: hand.length };
+        result = { takenCount: takenCards.length, takenCardIds: takenCards.map(c => c.id), handCount: hand.length };
         break;
       }
 
+      // ────────────────────────────────────────────────────────────────────────
       case MoveType.PLAY_MELD: {
         if (turnPhase !== 'CAN_MELD_OR_DISCARD') throw new BadRequestException('WRONG_PHASE');
         const cards = this.resolveCards(hand, move.cardIds || []);
         const validation = validateMeld(cards, state.mode as string);
         if (!validation.valid) throw new BadRequestException(validation.reason || 'INVALID_MELD');
         const meldType = validation.type!;
+
+        // ── Pre-meld Classic / Professional Direct checks ────────────────────
+        const handAfterMeld = hand.filter(c => !cards.some(mc => mc.id === c.id));
+
+        if (state.mode === GameMode.CLASSIC) {
+          // Classic: cannot meld ALL cards to 0 unless a pot is available to take
+          if (handAfterMeld.length === 0) {
+            const teamPotCount = (state.potCollectedByTeam ?? []).filter(id => id === playerTeamId).length;
+            const potAvailable = teamPotCount < 1 && state.potPiles.some(p => p.length > 0);
+            if (!potAvailable) {
+              throw new BadRequestException(
+                'Classic: cannot meld all cards — must leave at least one card to discard',
+              );
+            }
+          }
+          // Classic: cannot leave a lone wild as the last card in hand
+          if (handAfterMeld.length === 1 && handAfterMeld[0].isWild) {
+            throw new BadRequestException(
+              'Classic: cannot leave a lone Joker or 2 as your last card',
+            );
+          }
+        }
+
+        if (state.mode === GameMode.PROFESSIONAL && state.endMode === 'DIRECT' && handAfterMeld.length === 0) {
+          // Professional Direct: closing by on-the-fly meld requires Buraco + pot
+          const teamPotCount = (state.potCollectedByTeam ?? []).filter(id => id === playerTeamId).length;
+          const potAvailable = state.potPiles.some(p => p.length > 0) && teamPotCount < 2;
+          if (!potAvailable) {
+            // No pot to take — this would be a close; validate close conditions
+            const teamHasBuraco = teamPlayerIds.some(uid => hasBuraco(state.melds[uid] || []));
+            if (!teamHasBuraco) {
+              throw new BadRequestException(
+                'Professional Direct: must have a Buraco before closing on-the-fly',
+              );
+            }
+            if (teamPotCount === 0) {
+              throw new BadRequestException(
+                'Professional Direct: must have collected the pot before closing on-the-fly',
+              );
+            }
+          }
+        }
+
+        // ── Remove cards from hand ───────────────────────────────────────────
         const sortedCards = sortMeldCards(cards, meldType);
-        const meldTeamId = state.players.find((p) => p.userId === playerId)?.teamId ?? 1;
-        const newMeld: Meld = {
-          id: uuidv4(),
-          teamId: meldTeamId,
-          type: meldType,
-          cards: sortedCards,
-          isNatural: sortedCards.every((c) => !c.isWild),
-          isCanasta: sortedCards.length >= 7,
-        };
-        state.melds[playerId].push(newMeld);
-        (move.cardIds ?? []).forEach((id) => { const idx = hand.findIndex((c) => c.id === id); if (idx !== -1) hand.splice(idx, 1); });
-        result = { meld: newMeld, handCount: hand.length };
+        ;(move.cardIds ?? []).forEach(id => {
+          const idx = hand.findIndex(c => c.id === id);
+          if (idx !== -1) hand.splice(idx, 1);
+        });
+
+        // ── Auto-merge: extend existing team meld instead of creating new one ─
+        const teamUserIds = teamPlayerIds;
+        const allTeamMelds = teamUserIds.flatMap(uid => state.melds[uid] || []);
+        const mergeTarget = tryFindMergeTarget(cards, meldType, allTeamMelds, state.mode as string);
+
+        if (mergeTarget) {
+          mergeTarget.cards = sortMeldCards([...mergeTarget.cards, ...sortedCards], meldType);
+          mergeTarget.isCanasta = mergeTarget.cards.length >= 7;
+          mergeTarget.isNatural = mergeTarget.cards.every(c => !c.isWild);
+          const nowDirty = computeMeldHasActingWild(mergeTarget.cards, meldType);
+          mergeTarget.everDirty = state.mode === GameMode.PROFESSIONAL
+            ? (mergeTarget.everDirty || nowDirty)
+            : nowDirty;
+          result = { meld: mergeTarget, merged: true, handCount: hand.length };
+        } else {
+          const isDirty = computeMeldHasActingWild(sortedCards, meldType);
+          const newMeld: Meld = {
+            id:        uuidv4(),
+            teamId:    playerTeamId,
+            type:      meldType,
+            cards:     sortedCards,
+            isNatural: sortedCards.every(c => !c.isWild),
+            isCanasta: sortedCards.length >= 7,
+            everDirty: isDirty,
+          };
+          state.melds[playerId].push(newMeld);
+          result = { meld: newMeld, merged: false, handCount: hand.length };
+        }
+
+        // ── Professional: Buraco of 2 instant win ───────────────────────────
+        if (state.mode === GameMode.PROFESSIONAL) {
+          const allMelds = Object.values(state.melds).flat();
+          if (hasBuracoOfTwos(allMelds)) {
+            state.moveCount++;
+            await this.redis.setJson(this.stateKey(gameId), state, 86400);
+            await this.prisma.gameMove.create({
+              data: { gameId, playerId, turnNumber: state.moveCount, moveType: move.type, cardData: { ...result, buracoOfTwos: true }, isValid: true },
+            });
+            const finalResult = await this.finalizeGame(gameId, state, playerTeamId);
+            this.socketService.emitToRoom(`game:${gameId}`, 'game:end', { gameId, buracoOfTwos: true, ...finalResult });
+            return { state: this.buildClientView(state, playerId), result, ...finalResult };
+          }
+        }
+
+        // ── Hand empty → try pot or close ────────────────────────────────────
         if (hand.length === 0) {
           const potAward = this.tryAwardPot(state, playerId, 'PLAY_MELD');
           if (potAward) {
             result.potAwarded = potAward;
+          } else if (state.mode === GameMode.PROFESSIONAL && state.endMode === 'DIRECT') {
+            // Close on-the-fly in Professional Direct (close conditions already validated above)
+            state.moveCount++;
+            await this.redis.setJson(this.stateKey(gameId), state, 86400);
+            await this.prisma.gameMove.create({
+              data: { gameId, playerId, turnNumber: state.moveCount, moveType: move.type, cardData: result, isValid: true },
+            });
+            return this.finalizeGame(gameId, state, playerTeamId);
           } else {
+            // Classic: already blocked above. Professional Indirect or edge: finalize without close bonus.
             state.moveCount++;
             await this.redis.setJson(this.stateKey(gameId), state, 86400);
             await this.prisma.gameMove.create({
@@ -351,28 +481,100 @@ export class GameEngineService {
         break;
       }
 
+      // ────────────────────────────────────────────────────────────────────────
       case MoveType.ADD_TO_MELD: {
         if (turnPhase !== 'CAN_MELD_OR_DISCARD') throw new BadRequestException('WRONG_PHASE');
-        const playerTeamId = state.players.find((p) => p.userId === playerId)?.teamId;
-        const teamUserIds = state.players.filter((p) => p.teamId === playerTeamId).map((p) => p.userId);
         let meld: Meld | undefined;
-        for (const uid of teamUserIds) {
-          meld = state.melds[uid]?.find((m) => m.id === move.meldId);
+        for (const uid of teamPlayerIds) {
+          meld = state.melds[uid]?.find(m => m.id === move.meldId);
           if (meld) break;
         }
         if (!meld) throw new NotFoundException('Meld not found');
         const cards = this.resolveCards(hand, move.cardIds || []);
-        if (!canAddToMeld(meld, cards, state.mode as string)) throw new BadRequestException('Cannot add those cards to this meld');
+        if (!canAddToMeld(meld, cards, state.mode as string)) {
+          throw new BadRequestException('Cannot add those cards to this meld');
+        }
+
+        // ── Pre-add Classic / Professional Direct checks ─────────────────────
+        const handAfterAdd = hand.filter(c => !cards.some(mc => mc.id === c.id));
+
+        if (state.mode === GameMode.CLASSIC) {
+          if (handAfterAdd.length === 0) {
+            const teamPotCount = (state.potCollectedByTeam ?? []).filter(id => id === playerTeamId).length;
+            const potAvailable = teamPotCount < 1 && state.potPiles.some(p => p.length > 0);
+            if (!potAvailable) {
+              throw new BadRequestException(
+                'Classic: cannot play all cards — must leave at least one card to discard',
+              );
+            }
+          }
+          if (handAfterAdd.length === 1 && handAfterAdd[0].isWild) {
+            throw new BadRequestException(
+              'Classic: cannot leave a lone Joker or 2 as your last card',
+            );
+          }
+        }
+
+        if (state.mode === GameMode.PROFESSIONAL && state.endMode === 'DIRECT' && handAfterAdd.length === 0) {
+          const teamPotCount = (state.potCollectedByTeam ?? []).filter(id => id === playerTeamId).length;
+          const potAvailable = state.potPiles.some(p => p.length > 0) && teamPotCount < 2;
+          if (!potAvailable) {
+            const teamHasBuraco = teamPlayerIds.some(uid => hasBuraco(state.melds[uid] || []));
+            if (!teamHasBuraco) {
+              throw new BadRequestException(
+                'Professional Direct: must have a Buraco before closing on-the-fly',
+              );
+            }
+            if (teamPotCount === 0) {
+              throw new BadRequestException(
+                'Professional Direct: must have collected the pot before closing on-the-fly',
+              );
+            }
+          }
+        }
+
+        // ── Apply add ────────────────────────────────────────────────────────
         meld.cards.push(...cards);
-        meld.cards = sortMeldCards(meld.cards, meld.type);
+        meld.cards     = sortMeldCards(meld.cards, meld.type);
         meld.isCanasta = meld.cards.length >= 7;
-        meld.isNatural = meld.cards.every((c) => !c.isWild);
-        (move.cardIds ?? []).forEach((id) => { const idx = hand.findIndex((c) => c.id === id); if (idx !== -1) hand.splice(idx, 1); });
+        meld.isNatural = meld.cards.every(c => !c.isWild);
+        const nowDirty = computeMeldHasActingWild(meld.cards, meld.type);
+        meld.everDirty = state.mode === GameMode.PROFESSIONAL
+          ? (meld.everDirty || nowDirty)
+          : nowDirty;
+        ;(move.cardIds ?? []).forEach(id => {
+          const idx = hand.findIndex(c => c.id === id);
+          if (idx !== -1) hand.splice(idx, 1);
+        });
         result = { meld, handCount: hand.length };
+
+        // ── Professional: Buraco of 2 instant win ───────────────────────────
+        if (state.mode === GameMode.PROFESSIONAL) {
+          const allMelds = Object.values(state.melds).flat();
+          if (hasBuracoOfTwos(allMelds)) {
+            state.moveCount++;
+            await this.redis.setJson(this.stateKey(gameId), state, 86400);
+            await this.prisma.gameMove.create({
+              data: { gameId, playerId, turnNumber: state.moveCount, moveType: move.type, cardData: { ...result, buracoOfTwos: true }, isValid: true },
+            });
+            const finalResult = await this.finalizeGame(gameId, state, playerTeamId);
+            this.socketService.emitToRoom(`game:${gameId}`, 'game:end', { gameId, buracoOfTwos: true, ...finalResult });
+            return { state: this.buildClientView(state, playerId), result, ...finalResult };
+          }
+        }
+
+        // ── Hand empty → try pot or close ────────────────────────────────────
         if (hand.length === 0) {
           const potAward = this.tryAwardPot(state, playerId, 'ADD_TO_MELD');
           if (potAward) {
             result.potAwarded = potAward;
+          } else if (state.mode === GameMode.PROFESSIONAL && state.endMode === 'DIRECT') {
+            state.moveCount++;
+            await this.redis.setJson(this.stateKey(gameId), state, 86400);
+            await this.prisma.gameMove.create({
+              data: { gameId, playerId, turnNumber: state.moveCount, moveType: move.type, cardData: result, isValid: true },
+            });
+            return this.finalizeGame(gameId, state, playerTeamId);
           } else {
             state.moveCount++;
             await this.redis.setJson(this.stateKey(gameId), state, 86400);
@@ -385,16 +587,17 @@ export class GameEngineService {
         break;
       }
 
+      // ────────────────────────────────────────────────────────────────────────
       case MoveType.DISCARD: {
         if (turnPhase !== 'CAN_MELD_OR_DISCARD') throw new BadRequestException('WRONG_PHASE');
         const cardId = move.cardIds?.[0];
         if (!cardId) throw new BadRequestException('No card specified for discard');
-        const idx = hand.findIndex((c) => c.id === cardId);
+        const idx = hand.findIndex(c => c.id === cardId);
         if (idx === -1) throw new BadRequestException('Card not in hand');
         const [card] = hand.splice(idx, 1);
 
         if (hand.length === 0) {
-          // Auto-award pot if eligible (tryAwardPot also advances the turn for DISCARD)
+          // Auto-award pot first (tryAwardPot also advances the turn for DISCARD)
           const potAward = this.tryAwardPot(state, playerId, 'DISCARD');
           if (potAward) {
             state.discardPile.push(card);
@@ -402,21 +605,20 @@ export class GameEngineService {
             break;
           }
 
-          // No pot to award — validate and attempt close
+          // No pot — validate close
           if (state.mode === GameMode.CLASSIC && card.isWild) {
             hand.push(card);
-            throw new BadRequestException('Cannot close the game by discarding a wild card (Joker or Pinella)');
+            throw new BadRequestException('Classic: cannot close the game by discarding a wild card');
           }
 
-          const playerTeamId = state.players.find((p) => p.userId === playerId)?.teamId ?? 1;
-          const teamPlayerIds = state.players.filter((p) => p.teamId === playerTeamId).map((p) => p.userId);
-          const teamHasBuraco = teamPlayerIds.some((uid) => hasBuraco(state.melds[uid] || []));
+          const teamHasBuraco = teamPlayerIds.some(uid => hasBuraco(state.melds[uid] || []));
           if (!teamHasBuraco) {
             hand.push(card);
             throw new BadRequestException('Your team must have at least one Buraco (7+ cards) to close the game');
           }
 
-          if (!(state.potCollectedByTeam ?? []).includes(playerTeamId)) {
+          const teamPotCount = (state.potCollectedByTeam ?? []).filter(id => id === playerTeamId).length;
+          if (teamPotCount === 0) {
             hand.push(card);
             throw new BadRequestException('Your team must collect the pot before closing the game');
           }
@@ -427,32 +629,48 @@ export class GameEngineService {
 
         state.discardPile.push(card);
         result = { discardedCard: card, handCount: hand.length };
-
         state.currentTurnIndex = (state.currentTurnIndex + 1) % state.turnOrder.length;
-        state.turnStartedAt = Date.now();
-        state.turnPhase = 'MUST_DRAW';
+        state.turnStartedAt    = Date.now();
+        state.turnPhase        = 'MUST_DRAW';
         break;
       }
 
+      // ────────────────────────────────────────────────────────────────────────
       case MoveType.PICKUP_POT: {
         if (turnPhase !== 'CAN_MELD_OR_DISCARD') throw new BadRequestException('WRONG_PHASE');
         if (!canPickupPot(hand)) throw new BadRequestException('Hand must be empty to pick up pot');
 
-        const playerTeamId = state.players.find((p) => p.userId === playerId)?.teamId ?? 1;
+        const teamPotCount = (state.potCollectedByTeam ?? []).filter(id => id === playerTeamId).length;
 
-        if ((state.potCollectedByTeam ?? []).includes(playerTeamId)) {
-          throw new BadRequestException('Your team has already collected their pot this game');
+        const isClassic      = state.mode === GameMode.CLASSIC;
+        const maxPots        = isClassic ? 1 : 2;
+        if (teamPotCount >= maxPots) {
+          throw new BadRequestException(
+            isClassic
+              ? 'Classic: your team has already collected their pot'
+              : 'Your team has already collected both pots',
+          );
         }
 
-        if (state.mode === GameMode.PROFESSIONAL) {
-          const teamPlayerIds = state.players.filter((p) => p.teamId === playerTeamId).map((p) => p.userId);
-          const teamHasBuraco = teamPlayerIds.some((uid) => hasBuraco(state.melds[uid] || []));
+        // Professional: must have Buraco before taking first pot
+        if (state.mode === GameMode.PROFESSIONAL && teamPotCount === 0) {
+          const teamHasBuraco = teamPlayerIds.some(uid => hasBuraco(state.melds[uid] || []));
           if (!teamHasBuraco) {
-            throw new BadRequestException('Your team must have at least one Buraco before collecting the pot (Professional mode)');
+            throw new BadRequestException(
+              'Professional: must have at least one Buraco before collecting the pot',
+            );
           }
         }
 
-        const pot = state.potPiles.find((p) => p.length > 0);
+        // Second pot (and Professional Direct first pot): only on-the-fly (hand empty via meld, not manual PICKUP_POT)
+        // PICKUP_POT is the manual command — block second pot here
+        if (teamPotCount >= 1) {
+          throw new BadRequestException(
+            'Second pot can only be taken on-the-fly (by melding all cards, not manually)',
+          );
+        }
+
+        const pot = state.potPiles.find(p => p.length > 0);
         if (!pot) throw new BadRequestException('No pot available');
         hand.push(...pot.splice(0, pot.length));
 
@@ -466,15 +684,14 @@ export class GameEngineService {
 
     state.moveCount++;
     await this.redis.setJson(this.stateKey(gameId), state, 86400);
-
     await this.prisma.gameMove.create({
       data: { gameId, playerId, turnNumber: state.moveCount, moveType: move.type, cardData: result, isValid: true },
     });
 
     return {
-      state: this.buildClientView(state, playerId),
+      state:            this.buildClientView(state, playerId),
       result,
-      teamId: state.players.find((p) => p.userId === playerId)?.teamId,
+      teamId:           state.players.find(p => p.userId === playerId)?.teamId,
       nextTurnPlayerId: state.turnOrder[state.currentTurnIndex],
     };
   }
@@ -500,36 +717,53 @@ export class GameEngineService {
       }
     }
 
-    const winnerTeam = teamScores[1] >= teamScores[2] ? 1 : 2;
-    const winnerIds = state.players.filter((p) => p.teamId === winnerTeam).map((p) => p.userId);
-    const duration = Math.floor((Date.now() - state.gameStartedAt) / 1000);
+    const winnerTeam  = teamScores[1] >= teamScores[2] ? 1 : 2;
+    const winnerIds   = state.players.filter(p => p.teamId === winnerTeam).map(p => p.userId);
+    const duration    = Math.floor((Date.now() - state.gameStartedAt) / 1000);
 
     await this.prisma.$transaction(async (tx) => {
       await tx.gameSession.update({
         where: { id: gameId },
-        data: { status: GameStatus.COMPLETED, endedAt: new Date(), winnerIds, winnerTeam, duration,
-          players: { updateMany: state.players.map((p) => ({ where: { userId: p.userId }, data: { finalScore: teamScores[p.teamId], result: winnerIds.includes(p.userId) ? 'WIN' : 'LOSS' } })) },
+        data: {
+          status: GameStatus.COMPLETED,
+          endedAt: new Date(),
+          winnerIds,
+          winnerTeam,
+          duration,
+          players: {
+            updateMany: state.players.map(p => ({
+              where: { userId: p.userId },
+              data: { finalScore: teamScores[p.teamId], result: winnerIds.includes(p.userId) ? 'WIN' : 'LOSS' },
+            })),
+          },
         },
       });
 
       await tx.matchRecord.create({
         data: {
           gameId,
-          mode: state.mode,
-          variant: state.variant,
+          mode:      state.mode,
+          variant:   state.variant,
           winnerIds,
           winnerTeam,
-          scores: teamScores,
+          scores:    teamScores,
           duration,
-          players: { create: state.players.map((p) => ({ userId: p.userId, teamId: p.teamId, score: teamScores[p.teamId], result: winnerIds.includes(p.userId) ? 'WIN' : 'LOSS' })) },
+          players: {
+            create: state.players.map(p => ({
+              userId: p.userId,
+              teamId: p.teamId,
+              score:  teamScores[p.teamId],
+              result: winnerIds.includes(p.userId) ? 'WIN' : 'LOSS',
+            })),
+          },
         },
       });
     });
 
     await Promise.all(state.players.map(async (p) => {
       const isWinner = winnerIds.includes(p.userId);
-      const score = teamScores[p.teamId];
-      const reward = calculateMatchReward(score, isWinner);
+      const score    = teamScores[p.teamId];
+      const reward   = calculateMatchReward(score, isWinner);
       await this.statsService.updateAfterMatch(p.userId, isWinner ? 'WIN' : 'LOSS', reward.points, reward.xp);
       await this.economyService.distributeMatchReward(p.userId, gameId, reward.coins);
     }));
@@ -539,19 +773,20 @@ export class GameEngineService {
     return { winnerTeam, winnerIds, scores: teamScores, duration };
   }
 
-  // Immediately ends a 1v1 game when one player permanently disconnects.
-  // Returns null if the game is not ONE_VS_ONE or is already over.
-  async abandonGame(gameId: string, abandoningUserId: string): Promise<{ winnerTeam: number; winnerIds: string[]; scores: Record<number, number>; duration: number } | null> {
+  async abandonGame(
+    gameId: string,
+    abandoningUserId: string,
+  ): Promise<{ winnerTeam: number; winnerIds: string[]; scores: Record<number, number>; duration: number } | null> {
     const state = await this.redis.getJson<GameState>(this.stateKey(gameId));
     if (!state || state.status !== GameStatus.IN_PROGRESS) return null;
     if (state.variant !== GameVariant.ONE_VS_ONE) return null;
 
-    const abandoner = state.players.find((p) => p.userId === abandoningUserId);
+    const abandoner = state.players.find(p => p.userId === abandoningUserId);
     if (!abandoner) return null;
 
     const winnerTeam = abandoner.teamId === 1 ? 2 : 1;
-    const winnerIds = state.players.filter((p) => p.teamId === winnerTeam).map((p) => p.userId);
-    const duration = Math.floor((Date.now() - state.gameStartedAt) / 1000);
+    const winnerIds  = state.players.filter(p => p.teamId === winnerTeam).map(p => p.userId);
+    const duration   = Math.floor((Date.now() - state.gameStartedAt) / 1000);
     const scores: Record<number, number> = { 1: 0, 2: 0 };
 
     await this.prisma.$transaction(async (tx) => {
@@ -564,28 +799,27 @@ export class GameEngineService {
           winnerTeam,
           duration,
           players: {
-            updateMany: state.players.map((p) => ({
+            updateMany: state.players.map(p => ({
               where: { userId: p.userId },
               data: { result: winnerIds.includes(p.userId) ? 'WIN' : 'LOSS' },
             })),
           },
         },
       });
-
       await tx.matchRecord.create({
         data: {
           gameId,
-          mode: state.mode,
+          mode:    state.mode,
           variant: state.variant,
           winnerIds,
           winnerTeam,
           scores,
           duration,
           players: {
-            create: state.players.map((p) => ({
+            create: state.players.map(p => ({
               userId: p.userId,
               teamId: p.teamId,
-              score: 0,
+              score:  0,
               result: winnerIds.includes(p.userId) ? 'WIN' : 'LOSS',
             })),
           },
@@ -596,29 +830,29 @@ export class GameEngineService {
     await Promise.all(
       state.players.map(async (p) => {
         const isWinner = winnerIds.includes(p.userId);
-        const reward = calculateMatchReward(0, isWinner);
+        const reward   = calculateMatchReward(0, isWinner);
         await this.statsService.updateAfterMatch(p.userId, isWinner ? 'WIN' : 'LOSS', reward.points, reward.xp);
         await this.economyService.distributeMatchReward(p.userId, gameId, reward.coins);
       }),
     );
 
     await this.redis.del(this.stateKey(gameId));
-
     return { winnerTeam, winnerIds, scores, duration };
   }
 
-  // Ends a game for any variant when a player intentionally resigns/exits.
-  // Works for both 1v1 and 2v2: the resigning player's team loses, the other team wins.
-  async resignGame(gameId: string, resigningUserId: string): Promise<{ winnerTeam: number; winnerIds: string[]; scores: Record<number, number>; duration: number } | null> {
+  async resignGame(
+    gameId: string,
+    resigningUserId: string,
+  ): Promise<{ winnerTeam: number; winnerIds: string[]; scores: Record<number, number>; duration: number } | null> {
     const state = await this.redis.getJson<GameState>(this.stateKey(gameId));
     if (!state || state.status !== GameStatus.IN_PROGRESS) return null;
 
-    const resigner = state.players.find((p) => p.userId === resigningUserId);
+    const resigner = state.players.find(p => p.userId === resigningUserId);
     if (!resigner) return null;
 
     const winnerTeam = resigner.teamId === 1 ? 2 : 1;
-    const winnerIds = state.players.filter((p) => p.teamId === winnerTeam).map((p) => p.userId);
-    const duration = Math.floor((Date.now() - state.gameStartedAt) / 1000);
+    const winnerIds  = state.players.filter(p => p.teamId === winnerTeam).map(p => p.userId);
+    const duration   = Math.floor((Date.now() - state.gameStartedAt) / 1000);
     const scores: Record<number, number> = { 1: 0, 2: 0 };
 
     await this.prisma.$transaction(async (tx) => {
@@ -631,28 +865,27 @@ export class GameEngineService {
           winnerTeam,
           duration,
           players: {
-            updateMany: state.players.map((p) => ({
+            updateMany: state.players.map(p => ({
               where: { userId: p.userId },
               data: { result: winnerIds.includes(p.userId) ? 'WIN' : 'LOSS' },
             })),
           },
         },
       });
-
       await tx.matchRecord.create({
         data: {
           gameId,
-          mode: state.mode,
+          mode:    state.mode,
           variant: state.variant,
           winnerIds,
           winnerTeam,
           scores,
           duration,
           players: {
-            create: state.players.map((p) => ({
+            create: state.players.map(p => ({
               userId: p.userId,
               teamId: p.teamId,
-              score: 0,
+              score:  0,
               result: winnerIds.includes(p.userId) ? 'WIN' : 'LOSS',
             })),
           },
@@ -663,14 +896,13 @@ export class GameEngineService {
     await Promise.all(
       state.players.map(async (p) => {
         const isWinner = winnerIds.includes(p.userId);
-        const reward = calculateMatchReward(0, isWinner);
+        const reward   = calculateMatchReward(0, isWinner);
         await this.statsService.updateAfterMatch(p.userId, isWinner ? 'WIN' : 'LOSS', reward.points, reward.xp);
         await this.economyService.distributeMatchReward(p.userId, gameId, reward.coins);
       }),
     );
 
     await this.redis.del(this.stateKey(gameId));
-
     return { winnerTeam, winnerIds, scores, duration };
   }
 
@@ -693,12 +925,10 @@ export class GameEngineService {
     if (state.turnPhase === 'ROUND_ENDED') return;
 
     const playerId = state.turnOrder[state.currentTurnIndex];
-    const hand = state.hands[playerId];
+    const hand     = state.hands[playerId];
 
-    // ── Step 1: Auto-draw if player has not drawn this turn ───────────────────
     let drawnCard: Card | undefined;
     if (state.turnPhase === 'MUST_DRAW') {
-      // Refill stock from discard pile when exhausted — same rule as DRAW_STOCK in processMove
       if (state.stockPile.length === 0 && state.discardPile.length > 1) {
         const top = state.discardPile.pop()!;
         state.stockPile = shuffle(state.discardPile);
@@ -709,8 +939,10 @@ export class GameEngineService {
         hand.push(drawnCard);
         state.turnPhase = 'CAN_MELD_OR_DISCARD';
 
-        // Stock critically low → emit draw then finalize (same threshold as processMove)
-        if (state.stockPile.length < 2) {
+        const stockLow = state.mode === GameMode.CLASSIC
+          ? state.stockPile.length < 2
+          : state.stockPile.length === 0;
+        if (stockLow) {
           state.moveCount++;
           await this.redis.setJson(this.stateKey(gameId), state, 86400);
           await this.prisma.gameMove.create({
@@ -727,14 +959,10 @@ export class GameEngineService {
           return { playerId, autoAction: 'DRAW_THEN_FINALIZE', card: drawnCard };
         }
       }
-      // Stock truly empty: skip draw and proceed with unchanged hand
     }
 
-    // ── Step 2: Pick a random legal discard ───────────────────────────────────
     const discardIdx = this.pickLegalDiscardIndex(state, playerId, hand);
 
-    // Emit draw event before mutating state for the discard so clients animate
-    // hand+1 first, then hand after discard
     if (drawnCard) {
       const drawMove = { type: 'TIMEOUT_DRAW', playerId, cardId: drawnCard.id };
       this.socketService.emitToRoom(`game:${gameId}`, 'game:move_played', drawMove);
@@ -745,11 +973,10 @@ export class GameEngineService {
     }
 
     if (discardIdx === -1 || hand.length === 0) {
-      // No legal discard available — advance turn without discarding
       this.logger.warn(`Timeout: no legal discard for ${playerId} (hand=${hand.length}), advancing turn`);
       state.currentTurnIndex = (state.currentTurnIndex + 1) % state.turnOrder.length;
-      state.turnStartedAt = Date.now();
-      state.turnPhase = 'MUST_DRAW';
+      state.turnStartedAt    = Date.now();
+      state.turnPhase        = 'MUST_DRAW';
       await this.redis.setJson(this.stateKey(gameId), state, 86400);
       if (!drawnCard) {
         await this.socketService.emitPerPlayer(`game:${gameId}`, 'game:state_updated', async (uid) => ({
@@ -760,12 +987,10 @@ export class GameEngineService {
       return { playerId, autoAction: 'ADVANCE_NO_DISCARD' };
     }
 
-    // ── Step 3: Apply discard ─────────────────────────────────────────────────
     const [discardedCard] = hand.splice(discardIdx, 1);
     state.discardPile.push(discardedCard);
 
     if (hand.length === 0) {
-      // Check pot auto-award first (same order as processMove DISCARD)
       const potAward = this.tryAwardPot(state, playerId, 'DISCARD');
       if (potAward) {
         state.moveCount++;
@@ -782,8 +1007,7 @@ export class GameEngineService {
         return { playerId, autoAction: drawnCard ? 'DRAW_THEN_DISCARD' : 'DISCARD', card: discardedCard };
       }
 
-      // No pot — pickLegalDiscardIndex already validated close conditions
-      const playerTeamId = state.players.find((p) => p.userId === playerId)?.teamId ?? 1;
+      const playerTeamId = state.players.find(p => p.userId === playerId)?.teamId ?? 1;
       state.moveCount++;
       await this.redis.setJson(this.stateKey(gameId), state, 86400);
       await this.prisma.gameMove.create({
@@ -800,10 +1024,9 @@ export class GameEngineService {
       return { playerId, autoAction: drawnCard ? 'DRAW_THEN_DISCARD' : 'DISCARD', card: discardedCard };
     }
 
-    // ── Step 4: Normal mid-game discard — advance turn ────────────────────────
     state.currentTurnIndex = (state.currentTurnIndex + 1) % state.turnOrder.length;
-    state.turnStartedAt = Date.now();
-    state.turnPhase = 'MUST_DRAW';
+    state.turnStartedAt    = Date.now();
+    state.turnPhase        = 'MUST_DRAW';
     state.moveCount++;
     await this.redis.setJson(this.stateKey(gameId), state, 86400);
     await this.prisma.gameMove.create({
@@ -820,31 +1043,25 @@ export class GameEngineService {
     return { playerId, autoAction: drawnCard ? 'DRAW_THEN_DISCARD' : 'DISCARD', card: discardedCard };
   }
 
-  // Returns the index of a randomly chosen legal card to discard from hand.
-  // Returns -1 if no legal discard exists (e.g. only wild remains and close is invalid).
   private pickLegalDiscardIndex(state: GameState, playerId: string, hand: Card[]): number {
     if (hand.length === 0) return -1;
 
-    // Any card is legal to discard when it won't empty the hand (no close conditions apply)
-    if (hand.length > 1) {
-      return Math.floor(Math.random() * hand.length);
-    }
+    if (hand.length > 1) return Math.floor(Math.random() * hand.length);
 
-    // hand.length === 1 — discarding it would attempt to close the game; validate close conditions
-    const playerTeamId = state.players.find((p) => p.userId === playerId)?.teamId ?? 1;
-    const teamCollectedPot = (state.potCollectedByTeam ?? []).includes(playerTeamId);
-
-    // tryAwardPot will handle this case if a pot is available — the discard is legal
-    const hasPotToAward = !teamCollectedPot && state.potPiles.some((p) => p.length > 0);
+    // hand.length === 1 — discarding it would attempt to close; validate conditions
+    const playerTeamId = state.players.find(p => p.userId === playerId)?.teamId ?? 1;
+    const teamPotCount = (state.potCollectedByTeam ?? []).filter(id => id === playerTeamId).length;
+    const hasPotToAward = teamPotCount < (state.mode === GameMode.CLASSIC ? 1 : 2)
+      && state.potPiles.some(p => p.length > 0);
     if (hasPotToAward) return 0;
 
     const card = hand[0];
     if (state.mode === GameMode.CLASSIC && card.isWild) return -1;
 
-    const teamPlayerIds = state.players.filter((p) => p.teamId === playerTeamId).map((p) => p.userId);
-    const teamHasBuraco = teamPlayerIds.some((uid) => hasBuraco(state.melds[uid] || []));
+    const teamPlayerIds = state.players.filter(p => p.teamId === playerTeamId).map(p => p.userId);
+    const teamHasBuraco = teamPlayerIds.some(uid => hasBuraco(state.melds[uid] || []));
     if (!teamHasBuraco) return -1;
-    if (!teamCollectedPot) return -1;
+    if (teamPotCount === 0) return -1;
 
     return 0;
   }
@@ -852,7 +1069,6 @@ export class GameEngineService {
   // ── Toss ───────────────────────────────────────────────────────────────────
 
   private runToss(playerIds: string[], seatMap: Record<string, number>): TossResult {
-    // Separate toss deck — non-Joker cards only so every draw has a rank value
     let tossDeck = shuffle(generateDeck(false));
     const rounds: TossRound[] = [];
     let winnerPlayerId: string | null = null;
@@ -872,16 +1088,16 @@ export class GameEngineService {
         entries.push({ playerId: pid, seatIndex: seatMap[pid], card, rankValue: tossRankValue(card.rank) });
       }
 
-      const maxRank = Math.max(...entries.map((e) => e.rankValue));
-      const winners = entries.filter((e) => e.rankValue === maxRank);
-      const isTie = winners.length > 1;
+      const maxRank = Math.max(...entries.map(e => e.rankValue));
+      const winners = entries.filter(e => e.rankValue === maxRank);
+      const isTie   = winners.length > 1;
 
       const round: TossRound = { round: roundNum, isTie, players: entries };
       if (!isTie) {
-        round.winnerPlayerId = winners[0].playerId;
+        round.winnerPlayerId  = winners[0].playerId;
         round.winnerSeatIndex = winners[0].seatIndex;
-        round.reason = 'HIGH_CARD';
-        winnerPlayerId = winners[0].playerId;
+        round.reason          = 'HIGH_CARD';
+        winnerPlayerId  = winners[0].playerId;
         winnerSeatIndex = winners[0].seatIndex;
       }
       rounds.push(round);
@@ -897,6 +1113,20 @@ export class GameEngineService {
     };
   }
 
+  /**
+   * Awards a pot to the player whose hand just became empty.
+   *
+   * Classic:
+   *   - Max 1 pot per team.
+   *   - DISCARD path: pot taken, turn ends (advance turn).
+   *   - PLAY_MELD / ADD_TO_MELD path: pot taken, turn continues (same phase).
+   *
+   * Professional:
+   *   - Max 2 pots per team.
+   *   - Must have at least 1 Buraco before taking the FIRST pot.
+   *   - Direct mode: first pot only on-the-fly (PLAY_MELD / ADD_TO_MELD), not DISCARD.
+   *   - Second pot: only on-the-fly (PLAY_MELD / ADD_TO_MELD), not DISCARD.
+   */
   private tryAwardPot(
     state: GameState,
     playerId: string,
@@ -905,10 +1135,30 @@ export class GameEngineService {
     const hand = state.hands[playerId];
     if (hand.length !== 0) return null;
 
-    const teamId = state.players.find((p) => p.userId === playerId)?.teamId ?? 1;
-    if ((state.potCollectedByTeam ?? []).includes(teamId)) return null;
+    const teamId      = state.players.find(p => p.userId === playerId)?.teamId ?? 1;
+    const teamPotCount = (state.potCollectedByTeam ?? []).filter(id => id === teamId).length;
+    const isClassic    = state.mode === GameMode.CLASSIC;
+    const maxPots      = isClassic ? 1 : 2;
+    if (teamPotCount >= maxPots) return null;
 
-    const potIndex = state.potPiles.findIndex((p) => p.length > 0);
+    const isSecondPot = teamPotCount >= 1;
+
+    // Second pot: only on-the-fly
+    if (isSecondPot && moveType === 'DISCARD') return null;
+
+    // Professional restrictions
+    if (!isClassic) {
+      const teamPlayerIds = state.players.filter(p => p.teamId === teamId).map(p => p.userId);
+      const teamHasBuraco = teamPlayerIds.some(uid => hasBuraco(state.melds[uid] || []));
+
+      // Must have Buraco before first pot
+      if (!isSecondPot && !teamHasBuraco) return null;
+
+      // Direct mode: first pot only on-the-fly
+      if (!isSecondPot && state.endMode === 'DIRECT' && moveType === 'DISCARD') return null;
+    }
+
+    const potIndex = state.potPiles.findIndex(p => p.length > 0);
     if (potIndex === -1) return null;
 
     const potCards = [...state.potPiles[potIndex]];
@@ -919,17 +1169,16 @@ export class GameEngineService {
 
     if (moveType === 'DISCARD') {
       state.currentTurnIndex = (state.currentTurnIndex + 1) % state.turnOrder.length;
-      state.turnStartedAt = Date.now();
-      state.turnPhase = 'MUST_DRAW';
+      state.turnStartedAt    = Date.now();
+      state.turnPhase        = 'MUST_DRAW';
     }
-    // For PLAY_MELD / ADD_TO_MELD: keep currentTurnIndex and CAN_MELD_OR_DISCARD phase
 
-    return { playerId, teamId, potIndex, cardCount: potCards.length, cardIds: potCards.map((c) => c.id) };
+    return { playerId, teamId, potIndex, cardCount: potCards.length, cardIds: potCards.map(c => c.id) };
   }
 
   private resolveCards(hand: Card[], cardIds: string[]): Card[] {
-    return cardIds.map((id) => {
-      const card = hand.find((c) => c.id === id);
+    return cardIds.map(id => {
+      const card = hand.find(c => c.id === id);
       if (!card) throw new BadRequestException(`Card ${id} not in hand`);
       return card;
     });

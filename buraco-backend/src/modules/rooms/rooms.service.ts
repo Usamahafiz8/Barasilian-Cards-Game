@@ -329,7 +329,7 @@ export class RoomsService implements OnModuleInit {
         return null;
       }
 
-      const gameState = await this.gameEngine.startGame(room.id, room.mode, room.variant, seatOrderedIds);
+      const gameState = await this.gameEngine.startGame(room.id, room.mode, room.variant, seatOrderedIds, room.endMode, room.makart);
       await this.transitionToInProgress(room.id, gameState.gameId);
 
       this.socketService.emitToRoom(`room:${room.id}`, 'room:update', {
