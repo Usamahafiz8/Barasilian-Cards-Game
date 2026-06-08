@@ -321,9 +321,9 @@ export class GameEngineService {
         state.turnPhase = 'CAN_MELD_OR_DISCARD';
         result = { card, handCount: hand.length, stockPileCount: state.stockPile.length };
 
-        // Classic: ≤ 2 cards left; Professional: 0 cards left
+        // Classic: ≤ 2 cards remaining (DeckStopClassic = 2); Professional: 0 cards remaining
         const stockLow = state.mode === GameMode.CLASSIC
-          ? state.stockPile.length < 2
+          ? state.stockPile.length <= 2
           : state.stockPile.length === 0;
         if (stockLow) {
           await this.redis.setJson(this.stateKey(gameId), state, 86400);
@@ -362,12 +362,19 @@ export class GameEngineService {
         if (!validation.valid) throw new BadRequestException(validation.reason || 'INVALID_MELD');
         const meldType = validation.type!;
 
-        // ── Pre-meld Classic / Professional Direct checks ────────────────────
+        // ── Lookahead: find merge target early (needed for Buraco-exception guard) ─
         const handAfterMeld = hand.filter(c => !cards.some(mc => mc.id === c.id));
+        const allTeamMelds = teamPlayerIds.flatMap(uid => state.melds[uid] || []);
+        const mergeTarget = tryFindMergeTarget(cards, meldType, allTeamMelds, state.mode as string);
+        // True when this play itself reaches 7+ cards (guards are relaxed when a Buraco is formed)
+        const thisMeldCreatesCanasta =
+          cards.length >= 7 ||
+          (mergeTarget !== null && mergeTarget.cards.length + cards.length >= 7);
 
+        // ── Pre-meld Classic / Professional Direct checks ──────────────────────
         if (state.mode === GameMode.CLASSIC) {
-          // Classic: cannot meld ALL cards to 0 unless a pot is available to take
-          if (handAfterMeld.length === 0) {
+          // Cannot meld all cards to 0 unless a pot is available — exception: play itself creates a Buraco
+          if (handAfterMeld.length === 0 && !thisMeldCreatesCanasta) {
             const teamPotCount = (state.potCollectedByTeam ?? []).filter(id => id === playerTeamId).length;
             const potAvailable = teamPotCount < 1 && state.potPiles.some(p => p.length > 0);
             if (!potAvailable) {
@@ -376,8 +383,8 @@ export class GameEngineService {
               );
             }
           }
-          // Classic: cannot leave a lone wild as the last card in hand
-          if (handAfterMeld.length === 1 && handAfterMeld[0].isWild) {
+          // Cannot leave a lone wild as last card — exception: play itself creates a Buraco
+          if (handAfterMeld.length === 1 && handAfterMeld[0].isWild && !thisMeldCreatesCanasta) {
             throw new BadRequestException(
               'Classic: cannot leave a lone Joker or 2 as your last card',
             );
@@ -385,36 +392,30 @@ export class GameEngineService {
         }
 
         if (state.mode === GameMode.PROFESSIONAL && state.endMode === 'DIRECT' && handAfterMeld.length === 0) {
-          // Professional Direct: closing by on-the-fly meld requires Buraco + pot
+          // Professional Direct: closing by on-the-fly meld requires Buraco + BOTH pots
           const teamPotCount = (state.potCollectedByTeam ?? []).filter(id => id === playerTeamId).length;
           const potAvailable = state.potPiles.some(p => p.length > 0) && teamPotCount < 2;
           if (!potAvailable) {
-            // No pot to take — this would be a close; validate close conditions
             const teamHasBuraco = teamPlayerIds.some(uid => hasBuraco(state.melds[uid] || []));
             if (!teamHasBuraco) {
               throw new BadRequestException(
                 'Professional Direct: must have a Buraco before closing on-the-fly',
               );
             }
-            if (teamPotCount === 0) {
+            if (teamPotCount < 2) {
               throw new BadRequestException(
-                'Professional Direct: must have collected the pot before closing on-the-fly',
+                'Professional Direct: must have collected both pots before closing on-the-fly',
               );
             }
           }
         }
 
-        // ── Remove cards from hand ───────────────────────────────────────────
+        // ── Remove cards from hand ─────────────────────────────────────────────
         const sortedCards = sortMeldCards(cards, meldType);
         ;(move.cardIds ?? []).forEach(id => {
           const idx = hand.findIndex(c => c.id === id);
           if (idx !== -1) hand.splice(idx, 1);
         });
-
-        // ── Auto-merge: extend existing team meld instead of creating new one ─
-        const teamUserIds = teamPlayerIds;
-        const allTeamMelds = teamUserIds.flatMap(uid => state.melds[uid] || []);
-        const mergeTarget = tryFindMergeTarget(cards, meldType, allTeamMelds, state.mode as string);
 
         if (mergeTarget) {
           mergeTarget.cards = sortMeldCards([...mergeTarget.cards, ...sortedCards], meldType);
@@ -497,9 +498,11 @@ export class GameEngineService {
 
         // ── Pre-add Classic / Professional Direct checks ─────────────────────
         const handAfterAdd = hand.filter(c => !cards.some(mc => mc.id === c.id));
+        // True when adding these cards brings the target meld to 7+ (Buraco created this turn)
+        const addCreatesCanasta = meld.cards.length + cards.length >= 7;
 
         if (state.mode === GameMode.CLASSIC) {
-          if (handAfterAdd.length === 0) {
+          if (handAfterAdd.length === 0 && !addCreatesCanasta) {
             const teamPotCount = (state.potCollectedByTeam ?? []).filter(id => id === playerTeamId).length;
             const potAvailable = teamPotCount < 1 && state.potPiles.some(p => p.length > 0);
             if (!potAvailable) {
@@ -508,7 +511,7 @@ export class GameEngineService {
               );
             }
           }
-          if (handAfterAdd.length === 1 && handAfterAdd[0].isWild) {
+          if (handAfterAdd.length === 1 && handAfterAdd[0].isWild && !addCreatesCanasta) {
             throw new BadRequestException(
               'Classic: cannot leave a lone Joker or 2 as your last card',
             );
@@ -525,9 +528,9 @@ export class GameEngineService {
                 'Professional Direct: must have a Buraco before closing on-the-fly',
               );
             }
-            if (teamPotCount === 0) {
+            if (teamPotCount < 2) {
               throw new BadRequestException(
-                'Professional Direct: must have collected the pot before closing on-the-fly',
+                'Professional Direct: must have collected both pots before closing on-the-fly',
               );
             }
           }
@@ -618,9 +621,14 @@ export class GameEngineService {
           }
 
           const teamPotCount = (state.potCollectedByTeam ?? []).filter(id => id === playerTeamId).length;
-          if (teamPotCount === 0) {
+          const requiredPots = state.mode === GameMode.PROFESSIONAL ? 2 : 1;
+          if (teamPotCount < requiredPots) {
             hand.push(card);
-            throw new BadRequestException('Your team must collect the pot before closing the game');
+            throw new BadRequestException(
+              state.mode === GameMode.PROFESSIONAL
+                ? 'Professional: must collect both pots before closing the game'
+                : 'Your team must collect the pot before closing the game',
+            );
           }
 
           state.discardPile.push(card);
@@ -940,7 +948,7 @@ export class GameEngineService {
         state.turnPhase = 'CAN_MELD_OR_DISCARD';
 
         const stockLow = state.mode === GameMode.CLASSIC
-          ? state.stockPile.length < 2
+          ? state.stockPile.length <= 2
           : state.stockPile.length === 0;
         if (stockLow) {
           state.moveCount++;
