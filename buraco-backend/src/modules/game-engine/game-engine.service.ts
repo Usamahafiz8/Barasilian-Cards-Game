@@ -342,10 +342,6 @@ export class GameEngineService {
           throw new BadRequestException('MAKART: must draw from stock when both hand and discard have 1 card');
         }
 
-        const topCard = state.discardPile[state.discardPile.length - 1];
-        if (state.mode !== GameMode.CLASSIC && !canPickupDiscardPile(topCard, hand)) {
-          throw new BadRequestException('Cannot pick up discard pile: need 2 naturals that form a meld with the top card');
-        }
         const takenCards = [...state.discardPile];
         hand.push(...takenCards);
         state.discardPile = [];
