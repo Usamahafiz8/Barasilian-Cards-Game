@@ -42,6 +42,7 @@ export class RoomsController {
         minPoints:     { type: 'number', description: 'Minimum ranking points to join' },
         endMode:       { type: 'string', enum: ['DIRECT', 'INDIRECT'], description: 'Professional only: end mode' },
         makart:        { type: 'boolean', description: 'Professional only: enable Makart rules' },
+        targetScore:   { type: 'number', description: 'Match target score. 0 = One Hand (single round). Positive = play until a team reaches this score (e.g. 100, 500, 2000).' },
       },
       required: ['mode', 'variant'],
     },

@@ -21,6 +21,7 @@ interface CreateRoomOptions {
   minPoints?: number;
   endMode?: string;
   makart?: boolean;
+  targetScore?: number;
 }
 
 interface SeatEntry {
@@ -329,7 +330,7 @@ export class RoomsService implements OnModuleInit {
         return null;
       }
 
-      const gameState = await this.gameEngine.startGame(room.id, room.mode, room.variant, seatOrderedIds, room.endMode, room.makart);
+      const gameState = await this.gameEngine.startGame(room.id, room.mode, room.variant, seatOrderedIds, room.endMode, room.makart, room.turnDuration, (room as any).targetScore ?? 0);
       await this.transitionToInProgress(room.id, gameState.gameId);
 
       this.socketService.emitToRoom(`room:${room.id}`, 'room:update', {
@@ -391,7 +392,8 @@ export class RoomsService implements OnModuleInit {
         isDefaultTable: false,
         endMode: isProfessional ? (opts.endMode ?? null) : null,
         makart: isProfessional ? (opts.makart ?? false) : false,
-      },
+        targetScore: opts.targetScore ?? 0,
+      } as any,
     });
     // Creator always gets seat 0 (team 1)
     return this.joinRoom(userId, room.id, 0);

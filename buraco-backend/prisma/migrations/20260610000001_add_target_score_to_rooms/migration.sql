@@ -1,0 +1,2 @@
+-- AlterTable
+ALTER TABLE "rooms" ADD COLUMN "targetScore" INTEGER NOT NULL DEFAULT 0;

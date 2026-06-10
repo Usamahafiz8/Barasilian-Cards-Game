@@ -83,6 +83,9 @@ export interface GameState {
   toss: TossResult | null;
   setupComplete: boolean;
   tossComplete: boolean;
+  targetScore: number;
+  matchScores: Record<number, number>;
+  winnerTeam?: number;
 }
 
 @Injectable()
@@ -126,6 +129,8 @@ export class GameEngineService {
     playerIds: string[],
     endMode?: string | null,
     makart?: boolean,
+    turnDuration?: number,
+    targetScore?: number,
   ): Promise<GameState> {
     const game = await this.prisma.gameSession.create({
       data: {
@@ -203,9 +208,11 @@ export class GameEngineService {
       turnPhase: 'MUST_DRAW',
       gameStartedAt: now,
       turnStartedAt: now,
-      turnDuration: 30,
+      turnDuration: turnDuration ?? 30,
       round: 1,
       scores: { 1: 0, 2: 0 },
+      targetScore: targetScore ?? 0,
+      matchScores: { 1: 0, 2: 0 },
       moveCount: 0,
       potCollectedByTeam: [],
       seatMap,
@@ -284,6 +291,10 @@ export class GameEngineService {
       setupComplete:        state.setupComplete ?? true,
       tossComplete:         state.tossComplete ?? true,
       toss:                 state.toss ?? null,
+      targetScore:          state.targetScore ?? 0,
+      matchScores:          state.matchScores ?? { 1: 0, 2: 0 },
+      winnerTeam:           state.winnerTeam ?? null,
+      turnTimeRemaining:    Math.max(0, state.turnDuration - Math.floor((Date.now() - state.turnStartedAt) / 1000)),
     };
   }
 
@@ -492,8 +503,7 @@ export class GameEngineService {
             await this.prisma.gameMove.create({
               data: { gameId, playerId, turnNumber: state.moveCount, moveType: move.type, cardData: { ...result, buracoOfTwos: true }, isValid: true },
             });
-            const finalResult = await this.finalizeGame(gameId, state, playerTeamId);
-            this.socketService.emitToRoom(`game:${gameId}`, 'game:end', { gameId, buracoOfTwos: true, ...finalResult });
+            const finalResult = await this.finalizeGame(gameId, state, playerTeamId, true);
             return { state: this.buildClientView(state, playerId), result, ...finalResult };
           }
         }
@@ -627,8 +637,7 @@ export class GameEngineService {
             await this.prisma.gameMove.create({
               data: { gameId, playerId, turnNumber: state.moveCount, moveType: move.type, cardData: { ...result, buracoOfTwos: true }, isValid: true },
             });
-            const finalResult = await this.finalizeGame(gameId, state, playerTeamId);
-            this.socketService.emitToRoom(`game:${gameId}`, 'game:end', { gameId, buracoOfTwos: true, ...finalResult });
+            const finalResult = await this.finalizeGame(gameId, state, playerTeamId, true);
             return { state: this.buildClientView(state, playerId), result, ...finalResult };
           }
         }
@@ -779,81 +788,144 @@ export class GameEngineService {
     };
   }
 
-  async finalizeGame(gameId: string, state?: GameState, closerTeamId?: number) {
+  async finalizeGame(gameId: string, state?: GameState, closerTeamId?: number, buracoOfTwos?: boolean) {
     if (!state) state = (await this.redis.getJson<GameState>(this.stateKey(gameId))) ?? undefined;
     if (!state) throw new NotFoundException('Game not found');
 
-    const teamScores: Record<number, number> = { 1: 0, 2: 0 };
+    // Compute this round's scores
+    const roundScores: Record<number, number> = { 1: 0, 2: 0 };
     for (const player of state.players) {
       const score = calculateScore(state.melds[player.userId] || [], state.hands[player.userId] || [], state.mode);
-      teamScores[player.teamId] = (teamScores[player.teamId] || 0) + score;
+      roundScores[player.teamId] = (roundScores[player.teamId] || 0) + score;
     }
-
     if (closerTeamId !== undefined) {
-      teamScores[closerTeamId] = (teamScores[closerTeamId] || 0) + 100;
+      roundScores[closerTeamId] = (roundScores[closerTeamId] || 0) + 100;
     }
-
     const collectedTeams = state.potCollectedByTeam ?? [];
     for (const teamId of [1, 2]) {
       if (!collectedTeams.includes(teamId)) {
-        teamScores[teamId] = (teamScores[teamId] || 0) - 100;
+        roundScores[teamId] = (roundScores[teamId] || 0) - 100;
       }
     }
 
-    const winnerTeam  = teamScores[1] >= teamScores[2] ? 1 : 2;
-    const winnerIds   = state.players.filter(p => p.teamId === winnerTeam).map(p => p.userId);
-    const duration    = Math.floor((Date.now() - state.gameStartedAt) / 1000);
+    // Accumulate into match scores
+    if (!state.matchScores) state.matchScores = { 1: 0, 2: 0 };
+    state.matchScores[1] = (state.matchScores[1] || 0) + roundScores[1];
+    state.matchScores[2] = (state.matchScores[2] || 0) + roundScores[2];
 
-    await this.prisma.$transaction(async (tx) => {
-      await tx.gameSession.update({
-        where: { id: gameId },
-        data: {
-          status: GameStatus.COMPLETED,
-          endedAt: new Date(),
-          winnerIds,
-          winnerTeam,
-          duration,
-          players: {
-            updateMany: state.players.map(p => ({
-              where: { userId: p.userId },
-              data: { finalScore: teamScores[p.teamId], result: winnerIds.includes(p.userId) ? 'WIN' : 'LOSS' },
-            })),
+    const targetScore = state.targetScore ?? 0;
+    const matchEnded =
+      targetScore === 0 ||
+      state.matchScores[1] >= targetScore ||
+      state.matchScores[2] >= targetScore;
+
+    if (matchEnded) {
+      const winnerTeam = state.matchScores[1] >= state.matchScores[2] ? 1 : 2;
+      const winnerIds  = state.players.filter(p => p.teamId === winnerTeam).map(p => p.userId);
+      const duration   = Math.floor((Date.now() - state.gameStartedAt) / 1000);
+
+      // Keep terminal state in Redis so GET /state returns COMPLETED status
+      state.status     = GameStatus.COMPLETED;
+      state.winnerTeam = winnerTeam;
+      await this.redis.setJson(this.stateKey(gameId), state, 7200);
+
+      await this.prisma.$transaction(async (tx) => {
+        await tx.gameSession.update({
+          where: { id: gameId },
+          data: {
+            status: GameStatus.COMPLETED,
+            endedAt: new Date(),
+            winnerIds,
+            winnerTeam,
+            duration,
+            players: {
+              updateMany: state.players.map(p => ({
+                where: { userId: p.userId },
+                data: { finalScore: state.matchScores[p.teamId], result: winnerIds.includes(p.userId) ? 'WIN' : 'LOSS' },
+              })),
+            },
           },
-        },
+        });
+
+        await tx.matchRecord.create({
+          data: {
+            gameId,
+            mode:      state.mode,
+            variant:   state.variant,
+            winnerIds,
+            winnerTeam,
+            scores:    state.matchScores,
+            duration,
+            players: {
+              create: state.players.map(p => ({
+                userId: p.userId,
+                teamId: p.teamId,
+                score:  state.matchScores[p.teamId],
+                result: winnerIds.includes(p.userId) ? 'WIN' : 'LOSS',
+              })),
+            },
+          },
+        });
       });
 
-      await tx.matchRecord.create({
-        data: {
-          gameId,
-          mode:      state.mode,
-          variant:   state.variant,
-          winnerIds,
-          winnerTeam,
-          scores:    teamScores,
-          duration,
-          players: {
-            create: state.players.map(p => ({
-              userId: p.userId,
-              teamId: p.teamId,
-              score:  teamScores[p.teamId],
-              result: winnerIds.includes(p.userId) ? 'WIN' : 'LOSS',
-            })),
-          },
-        },
-      });
-    });
+      await Promise.all(state.players.map(async (p) => {
+        const isWinner = winnerIds.includes(p.userId);
+        const reward   = calculateMatchReward(state.matchScores[p.teamId], isWinner);
+        await this.statsService.updateAfterMatch(p.userId, isWinner ? 'WIN' : 'LOSS', reward.points, reward.xp);
+        await this.economyService.distributeMatchReward(p.userId, gameId, reward.coins);
+      }));
 
-    await Promise.all(state.players.map(async (p) => {
-      const isWinner = winnerIds.includes(p.userId);
-      const score    = teamScores[p.teamId];
-      const reward   = calculateMatchReward(score, isWinner);
-      await this.statsService.updateAfterMatch(p.userId, isWinner ? 'WIN' : 'LOSS', reward.points, reward.xp);
-      await this.economyService.distributeMatchReward(p.userId, gameId, reward.coins);
+      const endPayload = {
+        gameId,
+        winnerTeam,
+        winnerIds,
+        scores: state.matchScores,
+        roundScores,
+        duration,
+        buracoOfTwos: !!buracoOfTwos,
+      };
+      this.socketService.emitToRoom(`game:${gameId}`, 'game:end', endPayload);
+      return { winnerTeam, winnerIds, scores: state.matchScores, roundScores, duration, buracoOfTwos: !!buracoOfTwos };
+    }
+
+    // Not match end — deal a new round with the same players
+    state.round           += 1;
+    state.scores           = { 1: 0, 2: 0 };
+    state.potCollectedByTeam = [];
+    state.status           = GameStatus.IN_PROGRESS;
+
+    const newDeck = shuffle(generateDeck(state.mode !== GameMode.PROFESSIONAL));
+    const newHands: Record<string, Card[]> = {};
+    const newPots: Card[][] = [[], []];
+    let di = 0;
+    for (const player of state.players) {
+      newHands[player.userId] = newDeck.slice(di, di + 11);
+      di += 11;
+    }
+    newPots[0] = newDeck.slice(di, di + 11); di += 11;
+    newPots[1] = newDeck.slice(di, di + 11); di += 11;
+    const newStock = newDeck.slice(di);
+    const topCard  = newStock.pop();
+
+    state.hands       = newHands;
+    state.potPiles    = newPots;
+    state.stockPile   = newStock;
+    state.discardPile = topCard ? [topCard] : [];
+    state.melds       = Object.fromEntries(state.players.map(p => [p.userId, []]));
+    state.teamMelds   = { 1: [], 2: [] };
+    state.currentTurnIndex = 0;
+    state.turnPhase   = 'MUST_DRAW';
+    state.turnStartedAt = Date.now();
+
+    await this.redis.setJson(this.stateKey(gameId), state, 86400);
+
+    const lastRoundScores = { ...roundScores };
+    await this.socketService.emitPerPlayer(`game:${gameId}`, 'game:new_round', async (uid) => ({
+      lastRoundScores,
+      ...this.buildClientView(state, uid),
     }));
 
-    await this.redis.del(this.stateKey(gameId));
-
-    return { winnerTeam, winnerIds, scores: teamScores, duration };
+    return { roundTransition: true as const, round: state.round, matchScores: state.matchScores };
   }
 
   async abandonGame(
@@ -1050,8 +1122,7 @@ export class GameEngineService {
             lastMove: drawMove,
             ...this.buildClientView(state, uid),
           }));
-          const finalResult = await this.finalizeGame(gameId, state);
-          this.socketService.emitToRoom(`game:${gameId}`, 'game:end', { gameId, ...finalResult });
+          await this.finalizeGame(gameId, state);
           return { playerId, autoAction: 'DRAW_THEN_FINALIZE', card: drawnCard };
         }
       }
@@ -1115,8 +1186,7 @@ export class GameEngineService {
         lastMove: discardMove,
         ...this.buildClientView(state, uid),
       }));
-      const finalResult = await this.finalizeGame(gameId, state, playerTeamId);
-      this.socketService.emitToRoom(`game:${gameId}`, 'game:end', { gameId, ...finalResult });
+      await this.finalizeGame(gameId, state, playerTeamId);
       return { playerId, autoAction: drawnCard ? 'DRAW_THEN_DISCARD' : 'DISCARD', card: discardedCard };
     }
 

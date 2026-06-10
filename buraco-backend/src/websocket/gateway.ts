@@ -188,7 +188,7 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
           return;
         }
 
-        const gameState = await this.gameEngine.startGame(roomId, room.mode, room.variant, seatOrderedIds);
+        const gameState = await this.gameEngine.startGame(roomId, room.mode, room.variant, seatOrderedIds, (room as any).endMode, (room as any).makart, (room as any).turnDuration, (room as any).targetScore ?? 0);
         await this.roomsService.transitionToInProgress(roomId, gameState.gameId);
 
         this.server.to(`room:${roomId}`).emit('room:update', {
@@ -306,15 +306,16 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
     try {
       const result = await this.gameEngine.processMove(data.gameId, userId, { type, source: data.source });
       if ('winnerTeam' in result) {
-        this.server.to(`game:${data.gameId}`).emit('game:end', { gameId: data.gameId, ...result });
+        // game:end already broadcast by finalizeGame — clear active games only
         const sockets = await this.server.in(`game:${data.gameId}`).fetchSockets();
         await Promise.all(sockets.map((s) => this.reconnection.clearActiveGame(s.data.userId)));
+      } else if ('roundTransition' in result) {
+        // game:new_round already broadcast by finalizeGame — nothing to do
       } else {
         const lastMove: Record<string, unknown> = data.source === 'STOCK'
           ? { type: 'DRAW', playerId: userId, teamId: result.teamId, source: 'STOCK', cardIds: result.result?.card ? [result.result.card.id] : [] }
           : { type: 'PICKUP_DISCARD', playerId: userId, teamId: result.teamId, source: 'DISCARD', cardIds: result.result?.takenCardIds ?? [] };
         socket.emit('game:state_updated', { lastMove, ...result.state });
-        // Broadcast the authoritative per-player view to everyone else in the game room.
         await this.broadcastGameState(data.gameId, lastMove, userId);
       }
     } catch (err) {
@@ -328,9 +329,10 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
     try {
       const result = await this.gameEngine.processMove(data.gameId, userId, { type: MoveType.DISCARD, cardIds: [data.cardId] });
       if (result && 'winnerTeam' in result) {
-        this.server.to(`game:${data.gameId}`).emit('game:end', { gameId: data.gameId, ...result });
         const sockets = await this.server.in(`game:${data.gameId}`).fetchSockets();
         await Promise.all(sockets.map((s) => this.reconnection.clearActiveGame(s.data.userId)));
+      } else if (result && 'roundTransition' in result) {
+        // handled by finalizeGame
       } else {
         const lastMove: Record<string, unknown> = { type: 'DISCARD', playerId: userId, teamId: result.teamId, cardId: data.cardId };
         if (result.result?.potAwarded) lastMove['potAwarded'] = result.result.potAwarded;
@@ -348,13 +350,15 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
     try {
       const result = await this.gameEngine.processMove(data.gameId, userId, { type: MoveType.PLAY_MELD, cardIds: data.cardIds });
       if ('winnerTeam' in result) {
-        this.server.to(`game:${data.gameId}`).emit('game:end', { gameId: data.gameId, ...result });
         const sockets = await this.server.in(`game:${data.gameId}`).fetchSockets();
         await Promise.all(sockets.map((s) => this.reconnection.clearActiveGame(s.data.userId)));
+      } else if ('roundTransition' in result) {
+        // handled by finalizeGame
       } else {
-        const lastMove: Record<string, unknown> = { type: 'MELD', playerId: userId, teamId: result.teamId, meldId: result.result?.meld?.id, cardIds: data.cardIds };
-        if (result.result?.potAwarded) lastMove['potAwarded'] = result.result.potAwarded;
-        socket.emit('game:state_updated', { lastMove, ...result.state });
+        const r = result as any;
+        const lastMove: Record<string, unknown> = { type: 'MELD', playerId: userId, teamId: r.teamId, meldId: r.result?.meld?.id, cardIds: data.cardIds };
+        if (r.result?.potAwarded) lastMove['potAwarded'] = r.result.potAwarded;
+        socket.emit('game:state_updated', { lastMove, ...r.state });
         await this.broadcastGameState(data.gameId, lastMove, userId);
       }
     } catch (err) {
@@ -368,13 +372,15 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
     try {
       const result = await this.gameEngine.processMove(data.gameId, userId, { type: MoveType.ADD_TO_MELD, meldId: data.meldId, cardIds: data.cardIds });
       if ('winnerTeam' in result) {
-        this.server.to(`game:${data.gameId}`).emit('game:end', { gameId: data.gameId, ...result });
         const sockets = await this.server.in(`game:${data.gameId}`).fetchSockets();
         await Promise.all(sockets.map((s) => this.reconnection.clearActiveGame(s.data.userId)));
+      } else if ('roundTransition' in result) {
+        // handled by finalizeGame
       } else {
-        const lastMove: Record<string, unknown> = { type: 'ADD_TO_MELD', playerId: userId, teamId: result.teamId, meldId: data.meldId, cardIds: data.cardIds };
-        if (result.result?.potAwarded) lastMove['potAwarded'] = result.result.potAwarded;
-        socket.emit('game:state_updated', { lastMove, ...result.state });
+        const r = result as any;
+        const lastMove: Record<string, unknown> = { type: 'ADD_TO_MELD', playerId: userId, teamId: r.teamId, meldId: data.meldId, cardIds: data.cardIds };
+        if (r.result?.potAwarded) lastMove['potAwarded'] = r.result.potAwarded;
+        socket.emit('game:state_updated', { lastMove, ...r.state });
         await this.broadcastGameState(data.gameId, lastMove, userId);
       }
     } catch (err) {
@@ -387,9 +393,10 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
     const userId = socket.data.userId;
     try {
       const result = await this.gameEngine.processMove(data.gameId, userId, { type: MoveType.PICKUP_POT });
-      if (!('winnerTeam' in result)) {
-        const lastMove = { type: 'PICKUP_POT', playerId: userId, teamId: result.teamId };
-        socket.emit('game:state_updated', { lastMove, ...result.state });
+      if (!('winnerTeam' in result) && !('roundTransition' in result)) {
+        const r = result as any;
+        const lastMove = { type: 'PICKUP_POT', playerId: userId, teamId: r.teamId };
+        socket.emit('game:state_updated', { lastMove, ...r.state });
         await this.broadcastGameState(data.gameId, lastMove, userId);
       }
     } catch (err) {

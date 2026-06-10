@@ -512,6 +512,7 @@ model Room {
   gameId         String?     @unique
   endMode            String?
   makart             Boolean     @default(false)
+  targetScore        Int         @default(0)
   isDefaultTable     Boolean     @default(false)
   tableLabel         String?
   tableOwnerUserId   String?
