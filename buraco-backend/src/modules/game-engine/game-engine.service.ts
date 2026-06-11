@@ -260,6 +260,7 @@ export class GameEngineService {
       isConnected: p.isConnected,
       seatIndex:   state.seatMap?.[p.userId] ?? 0,
       handCount:   (state.hands[p.userId] || []).length,
+      score:       (state.matchScores ?? {})[p.teamId] ?? 0,
     }));
 
     return {
@@ -916,6 +917,7 @@ export class GameEngineService {
     state.currentTurnIndex = 0;
     state.turnPhase   = 'MUST_DRAW';
     state.turnStartedAt = Date.now();
+    state.toss        = null; // no toss animation for round ≥ 2
 
     await this.redis.setJson(this.stateKey(gameId), state, 86400);
 

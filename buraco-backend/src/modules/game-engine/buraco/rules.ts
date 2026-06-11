@@ -122,7 +122,25 @@ export function validateMeld(
       return { valid: false, reason: 'Two 2s in a run require one to be in the natural rank-2 position' };
     }
   } else {
-    // Classic: any single wild allowed
+    // Classic: one acting wild allowed (Joker or 2).
+    // Exception: one same-suit 2 is natural when the framework (non-wild cards) is
+    // single-suit and contains a rank-3. That natural 2 does not consume the wild
+    // slot, so one additional wild (Joker or 2 of any suit) is still allowed.
+    if (wilds.length === 2) {
+      const wildTwos = wilds.filter(c => c.rank === '2');
+      const suits = new Set(naturals.map(c => c.suit));
+      if (wildTwos.length >= 1 && suits.size === 1 && naturals.some(c => c.rank === '3')) {
+        const frameworkSuit = [...suits][0] as string;
+        for (const cand of wildTwos) {
+          if (cand.suit !== frameworkSuit) continue;
+          const withNatural = [...naturals, cand];
+          if (isValidRun(withNatural, 1)) {
+            const ranks = withNatural.map(c => (c.rank === 'A' ? 1 : rankOrder(c.rank)));
+            if (ranks.includes(3)) return { valid: true, type: 'RUN' };
+          }
+        }
+      }
+    }
     if (wilds.length > 1) {
       return { valid: false, reason: 'A meld can contain at most one wild card' };
     }
