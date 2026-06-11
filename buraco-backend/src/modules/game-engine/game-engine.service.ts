@@ -86,6 +86,8 @@ export interface GameState {
   targetScore: number;
   matchScores: Record<number, number>;
   winnerTeam?: number;
+  /** Number of auto-played turns accumulated per player while disconnected. */
+  disconnectedMoves?: Record<string, number>;
 }
 
 @Injectable()
@@ -1076,6 +1078,129 @@ export class GameEngineService {
     return record;
   }
 
+  // ── Disconnect / reconnect state tracking ─────────────────────────────────
+
+  async markPlayerDisconnected(gameId: string, userId: string): Promise<void> {
+    const state = await this.redis.getJson<GameState>(this.stateKey(gameId));
+    if (!state || state.status !== GameStatus.IN_PROGRESS) return;
+    const player = state.players.find(p => p.userId === userId);
+    if (!player) return;
+    player.isConnected = false;
+    if (!state.disconnectedMoves) state.disconnectedMoves = {};
+    if (state.disconnectedMoves[userId] === undefined) state.disconnectedMoves[userId] = 0;
+    await this.redis.setJson(this.stateKey(gameId), state, 86400);
+  }
+
+  async markPlayerReconnected(gameId: string, userId: string): Promise<void> {
+    const state = await this.redis.getJson<GameState>(this.stateKey(gameId));
+    if (!state) return;
+    const player = state.players.find(p => p.userId === userId);
+    if (!player) return;
+    player.isConnected = true;
+    await this.redis.setJson(this.stateKey(gameId), state, 86400);
+  }
+
+  private async handleDisconnectedTurn(
+    state: GameState,
+    gameId: string,
+    playerId: string,
+  ): Promise<boolean> {
+    const player = state.players.find(p => p.userId === playerId);
+    if (!player || player.isConnected !== false) return false;
+
+    if (!state.disconnectedMoves) state.disconnectedMoves = {};
+    state.disconnectedMoves[playerId] = (state.disconnectedMoves[playerId] ?? 0) + 1;
+
+    if (state.disconnectedMoves[playerId] < 12) {
+      await this.redis.setJson(this.stateKey(gameId), state, 86400);
+      return false;
+    }
+
+    await this.forfeitDisconnectedPlayer(gameId, playerId, state);
+    return true;
+  }
+
+  private async forfeitDisconnectedPlayer(
+    gameId: string,
+    forfeitingUserId: string,
+    state: GameState,
+  ): Promise<void> {
+    if (state.status !== GameStatus.IN_PROGRESS) return;
+
+    const forfeiter = state.players.find(p => p.userId === forfeitingUserId);
+    if (!forfeiter) return;
+
+    const winnerTeam = forfeiter.teamId === 1 ? 2 : 1;
+    const winnerIds  = state.players.filter(p => p.teamId === winnerTeam).map(p => p.userId);
+    const duration   = Math.floor((Date.now() - state.gameStartedAt) / 1000);
+    const scores     = state.matchScores ?? { 1: 0, 2: 0 };
+
+    state.status     = GameStatus.COMPLETED;
+    state.winnerTeam = winnerTeam;
+    await this.redis.setJson(this.stateKey(gameId), state, 7200);
+
+    // Clear active game for all players directly (ReconnectionService not injected here)
+    await Promise.all(state.players.map(p => this.redis.del(`user:${p.userId}:activeGame`)));
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.gameSession.update({
+        where: { id: gameId },
+        data: {
+          status: GameStatus.COMPLETED,
+          endedAt: new Date(),
+          winnerIds,
+          winnerTeam,
+          duration,
+          players: {
+            updateMany: state.players.map(p => ({
+              where: { userId: p.userId },
+              data: {
+                finalScore: scores[p.teamId],
+                result: winnerIds.includes(p.userId) ? 'WIN' : 'LOSS',
+              },
+            })),
+          },
+        },
+      });
+
+      await tx.matchRecord.create({
+        data: {
+          gameId,
+          mode:      state.mode,
+          variant:   state.variant,
+          winnerIds,
+          winnerTeam,
+          scores,
+          duration,
+          players: {
+            create: state.players.map(p => ({
+              userId: p.userId,
+              teamId: p.teamId,
+              score:  scores[p.teamId],
+              result: winnerIds.includes(p.userId) ? 'WIN' : 'LOSS',
+            })),
+          },
+        },
+      });
+    });
+
+    await Promise.all(state.players.map(async (p) => {
+      const isWinner = winnerIds.includes(p.userId);
+      const reward   = calculateMatchReward(scores[p.teamId], isWinner);
+      await this.statsService.updateAfterMatch(p.userId, isWinner ? 'WIN' : 'LOSS', reward.points, reward.xp);
+      await this.economyService.distributeMatchReward(p.userId, gameId, reward.coins);
+    }));
+
+    this.socketService.emitToRoom(`game:${gameId}`, 'game:end', {
+      gameId,
+      winnerTeam,
+      winnerIds,
+      scores,
+      duration,
+      reason: 'opponent_forfeit',
+    });
+  }
+
   async handleTurnTimeout(gameId: string) {
     const state = await this.redis.getJson<GameState>(this.stateKey(gameId));
     if (!state || state.status !== GameStatus.IN_PROGRESS) return;
@@ -1153,6 +1278,7 @@ export class GameEngineService {
           ...this.buildClientView(state, uid),
         }));
       }
+      if (await this.handleDisconnectedTurn(state, gameId, playerId)) return;
       return { playerId, autoAction: 'ADVANCE_NO_DISCARD' };
     }
 
@@ -1173,6 +1299,7 @@ export class GameEngineService {
           lastMove: discardMove,
           ...this.buildClientView(state, uid),
         }));
+        if (await this.handleDisconnectedTurn(state, gameId, playerId)) return;
         return { playerId, autoAction: drawnCard ? 'DRAW_THEN_DISCARD' : 'DISCARD', card: discardedCard };
       }
 
@@ -1208,6 +1335,7 @@ export class GameEngineService {
       ...this.buildClientView(state, uid),
     }));
 
+    if (await this.handleDisconnectedTurn(state, gameId, playerId)) return;
     return { playerId, autoAction: drawnCard ? 'DRAW_THEN_DISCARD' : 'DISCARD', card: discardedCard };
   }
 

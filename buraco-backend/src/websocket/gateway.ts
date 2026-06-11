@@ -89,29 +89,17 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
     await this.redis.del(`online:${userId}`);
     this.logger.log(`User ${userId} disconnected`);
 
-    // Handle in-game disconnect
+    // In-game disconnect: mark disconnected and broadcast to opponents.
+    // Do NOT end the match immediately — the turn-timeout autoplay will run for
+    // this player's turns and forfeit only after 12 consecutive missed turns.
     const activeGame = await this.redis.get(`user:${userId}:activeGame`);
     if (activeGame) {
-      // 1v1: end the game immediately — no reconnect window makes sense with nobody left to wait
-      const abandoned = await this.gameEngine.abandonGame(activeGame, userId);
-      if (abandoned) {
-        this.server.to(`game:${activeGame}`).emit('game:end', {
-          gameId: activeGame,
-          reason: 'player_abandoned',
-          ...abandoned,
-        });
-        const sockets = await this.server.in(`game:${activeGame}`).fetchSockets();
-        await Promise.all(sockets.map((s) => this.reconnection.clearActiveGame(s.data.userId)));
-      } else {
-        // 2v2: start reconnect window as before
-        const timeout = this.config.get<number>('game.disconnectTimeoutSeconds');
-        await this.redis.set(`disconnect:${userId}:${activeGame}`, '1', timeout);
-        socket.to(`game:${activeGame}`).emit('game:player_disconnected', {
-          gameId: activeGame,
-          playerId: userId,
-          reconnectWindowSeconds: timeout,
-        });
-      }
+      await this.gameEngine.markPlayerDisconnected(activeGame, userId);
+      this.server.to(`game:${activeGame}`).emit('player:connection', {
+        gameId:    activeGame,
+        playerId:  userId,
+        connected: false,
+      });
     }
 
     // Grace period: remove player from lobby room if still offline after 15 s
@@ -249,6 +237,8 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
     socket.join(`game:${data.gameId}`);
     await this.redis.set(`user:${userId}:activeGame`, data.gameId, 86400);
     await this.reconnection.setActiveGame(userId, data.gameId);
+    // In case this join is a reconnect path, clear any disconnected flag
+    await this.gameEngine.markPlayerReconnected(data.gameId, userId);
 
     // Emit full setup sequence so Unity can animate toss then deal.
     try {
@@ -289,14 +279,20 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
   async handleGameReconnect(@ConnectedSocket() socket: Socket, @MessageBody() data: { gameId: string }) {
     const userId = socket.data.userId;
     socket.join(`game:${data.gameId}`);
+    await this.redis.set(`user:${userId}:activeGame`, data.gameId, 86400);
+    await this.reconnection.setActiveGame(userId, data.gameId);
 
-    const disconnectKey = `disconnect:${userId}:${data.gameId}`;
-    const wasDisconnected = await this.redis.exists(disconnectKey);
-    if (wasDisconnected) await this.redis.del(disconnectKey);
+    await this.gameEngine.markPlayerReconnected(data.gameId, userId);
 
     const state = await this.gameEngine.getGameState(data.gameId, userId);
     socket.emit('game:state_sync', state);
-    socket.to(`game:${data.gameId}`).emit('game:player_reconnected', { gameId: data.gameId, playerId: userId });
+
+    // Notify all players that this player is back (symmetric with player:connection false)
+    this.server.to(`game:${data.gameId}`).emit('player:connection', {
+      gameId:    data.gameId,
+      playerId:  userId,
+      connected: true,
+    });
   }
 
   @SubscribeMessage('game:move:draw')
