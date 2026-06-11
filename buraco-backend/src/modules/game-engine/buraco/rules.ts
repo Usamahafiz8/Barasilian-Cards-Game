@@ -211,24 +211,50 @@ function shouldAceBeHigh(naturals: Card[]): boolean {
 }
 
 function sortRunCards(cards: Card[]): Card[] {
-  const naturals = cards.filter(c => !c.isWild);
-  const wilds    = cards.filter(c => c.isWild);
+  const jokers = cards.filter(c => c.rank === 'JOKER');
+  const twos   = cards.filter(c => c.rank === '2');
+  const others = cards.filter(c => c.rank !== '2' && c.rank !== 'JOKER');
 
-  const aceHigh = shouldAceBeHigh(naturals);
-  const rank    = (c: Card) => (aceHigh && c.rank === 'A' ? 14 : rankOrder(c.rank));
+  // Identify the natural 2 using the same rule as validateMeld:
+  // framework must be single-suit and contain a rank-3.
+  let naturalTwo: Card | null = null;
+  const frameworkSuits = new Set(others.map(c => c.suit));
+  if (frameworkSuits.size === 1 && others.some(c => c.rank === '3') && twos.length > 0) {
+    const fs = [...frameworkSuits][0] as string;
+    naturalTwo = twos.find(c => c.suit === fs) ?? null;
+  }
 
-  const sorted = [...naturals].sort((a, b) => rank(b) - rank(a));
+  // Acting wilds = jokers + any 2 that is not the natural 2.
+  const actingWilds = [...jokers, ...twos.filter(c => c !== naturalTwo)];
+  const naturalCards = naturalTwo ? [...others, naturalTwo] : [...others];
 
-  if (wilds.length === 0) return sorted;
+  if (naturalCards.length === 0) return cards;
+
+  const aceHigh = shouldAceBeHigh(naturalCards);
+  const rank = (c: Card) => (aceHigh && c.rank === 'A' ? 14 : rankOrder(c.rank));
+
+  const sorted = [...naturalCards].sort((a, b) => rank(b) - rank(a));
+
+  if (actingWilds.length === 0) return sorted;
+
+  // Place the acting wild: fill the first internal gap, or extend an end.
+  // Validation guarantees at most 1 acting wild; extras are appended as a
+  // safety net so no card is ever dropped.
+  const [wild, ...extras] = actingWilds;
 
   for (let i = 0; i < sorted.length - 1; i++) {
     if (rank(sorted[i]) - rank(sorted[i + 1]) > 1) {
-      return [...sorted.slice(0, i + 1), wilds[0], ...sorted.slice(i + 1)];
+      return [...sorted.slice(0, i + 1), wild, ...sorted.slice(i + 1), ...extras];
     }
   }
 
-  // No internal gap — wild extends the lower end
-  return [...sorted, wilds[0]];
+  // No internal gap — extend an end.
+  // If the low end is Ace (rank 1), extend the high end instead.
+  const lowRank = rank(sorted[sorted.length - 1]);
+  if (lowRank > 1) {
+    return [...sorted, wild, ...extras];
+  }
+  return [wild, ...sorted, ...extras];
 }
 
 // ── Public helpers ────────────────────────────────────────────────────────────
