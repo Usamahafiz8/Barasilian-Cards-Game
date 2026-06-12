@@ -6,7 +6,7 @@ import { PrismaService } from '../../common/prisma/prisma.service';
 import { RedisService } from '../../common/redis/redis.service';
 import { EconomyService } from '../economy/economy.service';
 import { StatsService } from '../stats/stats.service';
-import { generateDeck, shuffle, Card, tossRankValue } from './buraco/deck';
+import { generateDeck, shuffle, Card, tossRankValue, rankOrder } from './buraco/deck';
 import {
   validateMeld,
   canAddToMeld,
@@ -88,6 +88,8 @@ export interface GameState {
   winnerTeam?: number;
   /** Number of auto-played turns accumulated per player while disconnected. */
   disconnectedMoves?: Record<string, number>;
+  /** Consecutive auto-played turns per player; resets to 0 on any manual action. */
+  consecutiveMissedTurns?: Record<string, number>;
 }
 
 @Injectable()
@@ -110,7 +112,12 @@ export class GameEngineService {
         keys.map(async (key) => {
           const state = await this.redis.getJson<GameState>(key);
           if (!state || state.status !== GameStatus.IN_PROGRESS) return;
-          if (Date.now() - state.turnStartedAt > state.turnDuration * 1000) {
+          if (state.turnPhase === 'ROUND_ENDED') return;
+          const playerId   = state.turnOrder[state.currentTurnIndex];
+          const missed     = state.consecutiveMissedTurns?.[playerId] ?? 0;
+          // Confirmed-inactive players (already missed ≥1 turn) get a fast 5 s timer.
+          const thresholdMs = (missed >= 1 ? 5 : state.turnDuration) * 1000;
+          if (Date.now() - state.turnStartedAt > thresholdMs) {
             await this.handleTurnTimeout(state.gameId);
           }
         }),
@@ -312,6 +319,10 @@ export class GameEngineService {
 
     const currentPlayer = state.turnOrder[state.currentTurnIndex];
     if (currentPlayer !== playerId) throw new BadRequestException('NOT_YOUR_TURN');
+
+    // Any successful manual move resets the consecutive-miss counter for this player.
+    if (!state.consecutiveMissedTurns) state.consecutiveMissedTurns = {};
+    state.consecutiveMissedTurns[playerId] = 0;
 
     const turnPhase: TurnPhase = state.turnPhase ?? 'MUST_DRAW';
     const hand = state.hands[playerId];
@@ -1209,53 +1220,68 @@ export class GameEngineService {
     const playerId = state.turnOrder[state.currentTurnIndex];
     const hand     = state.hands[playerId];
 
+    // Increment consecutive-miss counter before any state save so the updated
+    // value is always persisted with the auto-play result.
+    if (!state.consecutiveMissedTurns) state.consecutiveMissedTurns = {};
+    const priorMissed = state.consecutiveMissedTurns[playerId] ?? 0;
+    state.consecutiveMissedTurns[playerId] = priorMissed + 1;
+    // Smart play activates on the second and subsequent misses (priorMissed ≥ 1).
+    const useSmartPlay = priorMissed >= 1;
+
     let drawnCard: Card | undefined;
     if (state.turnPhase === 'MUST_DRAW') {
-      if (state.stockPile.length === 0 && state.discardPile.length > 1) {
-        const top = state.discardPile.pop()!;
-        state.stockPile = shuffle(state.discardPile);
-        state.discardPile = [top];
-      }
-      if (state.stockPile.length > 0) {
-        drawnCard = state.stockPile.pop()!;
-        hand.push(drawnCard);
-        state.turnPhase = 'CAN_MELD_OR_DISCARD';
+      // Smart play: take the discard top if it immediately helps form/extend a meld.
+      if (useSmartPlay && this.aiShouldTakeDiscard(state, hand)) {
+        const takenCards = [...state.discardPile];
+        hand.push(...takenCards);
+        state.discardPile = [];
+        state.turnPhase   = 'CAN_MELD_OR_DISCARD';
+        drawnCard = takenCards[takenCards.length - 1]; // representative card for the event
+      } else {
+        if (state.stockPile.length === 0 && state.discardPile.length > 1) {
+          const top = state.discardPile.pop()!;
+          state.stockPile = shuffle(state.discardPile);
+          state.discardPile = [top];
+        }
+        if (state.stockPile.length > 0) {
+          drawnCard = state.stockPile.pop()!;
+          hand.push(drawnCard);
+          state.turnPhase = 'CAN_MELD_OR_DISCARD';
 
-        let shouldFinalize = false;
-        if (state.mode === GameMode.CLASSIC) {
-          shouldFinalize = state.stockPile.length <= 2;
-        } else {
-          // Professional: refill stock from next untaken pot before finalizing
-          if (state.stockPile.length === 0) {
-            const potIdx = state.potPiles.findIndex(p => p.length > 0);
-            if (potIdx !== -1) {
-              state.stockPile = shuffle(state.potPiles[potIdx]);
-              state.potPiles[potIdx] = [];
-            } else {
-              shouldFinalize = true;
+          let shouldFinalize = false;
+          if (state.mode === GameMode.CLASSIC) {
+            shouldFinalize = state.stockPile.length <= 2;
+          } else {
+            // Professional: refill stock from next untaken pot before finalizing
+            if (state.stockPile.length === 0) {
+              const potIdx = state.potPiles.findIndex(p => p.length > 0);
+              if (potIdx !== -1) {
+                state.stockPile = shuffle(state.potPiles[potIdx]);
+                state.potPiles[potIdx] = [];
+              } else {
+                shouldFinalize = true;
+              }
             }
           }
-        }
 
-        if (shouldFinalize) {
-          state.moveCount++;
-          await this.redis.setJson(this.stateKey(gameId), state, 86400);
-          await this.prisma.gameMove.create({
-            data: { gameId, playerId, turnNumber: state.moveCount, moveType: MoveType.DRAW_STOCK, cardData: { auto: true, card: drawnCard as any }, isValid: true },
-          });
-          const drawMove = { type: 'TIMEOUT_DRAW', playerId, cardId: drawnCard.id };
-          this.socketService.emitToRoom(`game:${gameId}`, 'game:move_played', drawMove);
-          await this.socketService.emitPerPlayer(`game:${gameId}`, 'game:state_updated', async (uid) => ({
-            lastMove: drawMove,
-            ...this.buildClientView(state, uid),
-          }));
-          await this.finalizeGame(gameId, state);
-          return { playerId, autoAction: 'DRAW_THEN_FINALIZE', card: drawnCard };
+          if (shouldFinalize) {
+            state.moveCount++;
+            await this.redis.setJson(this.stateKey(gameId), state, 86400);
+            await this.prisma.gameMove.create({
+              data: { gameId, playerId, turnNumber: state.moveCount, moveType: MoveType.DRAW_STOCK, cardData: { auto: true, card: drawnCard as any }, isValid: true },
+            });
+            const drawMove = { type: 'TIMEOUT_DRAW', playerId, cardId: drawnCard.id };
+            this.socketService.emitToRoom(`game:${gameId}`, 'game:move_played', drawMove);
+            await this.socketService.emitPerPlayer(`game:${gameId}`, 'game:state_updated', async (uid) => ({
+              lastMove: drawMove,
+              ...this.buildClientView(state, uid),
+            }));
+            await this.finalizeGame(gameId, state);
+            return { playerId, autoAction: 'DRAW_THEN_FINALIZE', card: drawnCard };
+          }
         }
       }
     }
-
-    const discardIdx = this.pickLegalDiscardIndex(state, playerId, hand);
 
     if (drawnCard) {
       const drawMove = { type: 'TIMEOUT_DRAW', playerId, cardId: drawnCard.id };
@@ -1265,6 +1291,15 @@ export class GameEngineService {
         ...this.buildClientView(state, uid),
       }));
     }
+
+    // Smart play: lay down melds and extensions between draw and discard.
+    if (useSmartPlay) {
+      this.aiApplyMeldsAndExtensions(state, playerId);
+    }
+
+    const discardIdx = useSmartPlay
+      ? this.aiPickDiscardIndex(state, playerId, hand)
+      : this.pickLegalDiscardIndex(state, playerId, hand);
 
     if (discardIdx === -1 || hand.length === 0) {
       this.logger.warn(`Timeout: no legal discard for ${playerId} (hand=${hand.length}), advancing turn`);
@@ -1360,6 +1395,209 @@ export class GameEngineService {
     if (teamPotCount === 0) return -1;
 
     return 0;
+  }
+
+  // ── Auto-play AI ──────────────────────────────────────────────────────────
+
+  /** Returns true when the discard-pile top card can immediately form or extend a meld. */
+  private aiShouldTakeDiscard(state: GameState, hand: Card[]): boolean {
+    if (state.discardPile.length === 0) return false;
+    const top = state.discardPile[state.discardPile.length - 1];
+    return canPickupDiscardPile(top, hand);
+  }
+
+  /**
+   * Applies the best available new melds and meld extensions from the player's
+   * hand directly to the game state (no emit).  Called between draw and discard
+   * during smart auto-play so the final discard event carries the updated melds.
+   */
+  private aiApplyMeldsAndExtensions(state: GameState, playerId: string): void {
+    const hand         = state.hands[playerId];
+    const teamId       = state.players.find(p => p.userId === playerId)?.teamId ?? 1;
+    const teamIds      = state.players.filter(p => p.teamId === teamId).map(p => p.userId);
+    const mode         = state.mode as string;
+
+    // Helper: all melds that belong to the player's team.
+    const teamMelds = () => teamIds.flatMap(uid => state.melds[uid] || []);
+
+    // 1 — Play new melds from hand (leave at least 1 card to discard).
+    const newMelds = this.aiFindBestMeldsFromHand(hand, mode);
+    for (const meldCards of newMelds) {
+      if (hand.length - meldCards.length < 1) continue; // keep 1 for discard
+      const validation = validateMeld(meldCards, mode);
+      if (!validation.valid) continue;
+
+      const type        = validation.type!;
+      const allMelds    = teamMelds();
+      const mergeTarget = tryFindMergeTarget(meldCards, type, allMelds, mode);
+      const sorted      = sortMeldCards(meldCards, type);
+
+      meldCards.forEach(c => { const i = hand.findIndex(x => x.id === c.id); if (i >= 0) hand.splice(i, 1); });
+
+      if (mergeTarget) {
+        mergeTarget.cards     = sortMeldCards([...mergeTarget.cards, ...sorted], type);
+        mergeTarget.isCanasta = mergeTarget.cards.length >= 7;
+        mergeTarget.isNatural = mergeTarget.cards.every(c => !c.isWild);
+        const dirty           = computeMeldHasActingWild(mergeTarget.cards, type);
+        mergeTarget.everDirty = state.mode === GameMode.PROFESSIONAL ? (mergeTarget.everDirty || dirty) : dirty;
+      } else {
+        if (!state.melds[playerId]) state.melds[playerId] = [];
+        const dirty = computeMeldHasActingWild(sorted, type);
+        state.melds[playerId].push({
+          id: uuidv4(), teamId, type, cards: sorted,
+          isNatural: sorted.every(c => !c.isWild), isCanasta: sorted.length >= 7, everDirty: dirty,
+        });
+      }
+    }
+
+    // 2 — Extend existing team melds (again keep ≥1 card).
+    let improved = true;
+    while (improved && hand.length > 1) {
+      improved = false;
+      for (const meld of teamMelds()) {
+        for (let i = 0; i < hand.length; i++) {
+          if (hand.length <= 1) break;
+          if (!canAddToMeld(meld, [hand[i]], mode)) continue;
+          const [card] = hand.splice(i, 1);
+          meld.cards     = sortMeldCards([...meld.cards, card], meld.type);
+          meld.isCanasta = meld.cards.length >= 7;
+          meld.isNatural = meld.cards.every(c => !c.isWild);
+          const dirty    = computeMeldHasActingWild(meld.cards, meld.type);
+          meld.everDirty = state.mode === GameMode.PROFESSIONAL ? (meld.everDirty || dirty) : dirty;
+          improved = true;
+          break;
+        }
+      }
+    }
+  }
+
+  /**
+   * Finds the best set of non-overlapping melds playable from `hand`.
+   * Returns an array of card groups; each group is a valid meld.
+   */
+  private aiFindBestMeldsFromHand(hand: Card[], mode: string): Card[][] {
+    const result:    Card[][] = [];
+    const available: Card[]   = [...hand];
+
+    let found = true;
+    while (found && available.length >= 3) {
+      found      = false;
+      const meld = this.aiPickOneMeld(available, mode);
+      if (meld) {
+        result.push(meld);
+        meld.forEach(c => { const i = available.findIndex(x => x.id === c.id); if (i >= 0) available.splice(i, 1); });
+        found = true;
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Picks the single highest-scoring valid meld that can be formed from `available`.
+   * Tries sets (same rank) and runs (consecutive same-suit), with up to one wild.
+   */
+  private aiPickOneMeld(available: Card[], mode: string): Card[] | null {
+    let best: Card[] | null = null;
+    const consider = (candidate: Card[]) => {
+      if (candidate.length < 3) return;
+      if (validateMeld(candidate, mode).valid && (!best || candidate.length > best.length)) best = candidate;
+    };
+
+    const naturals = available.filter(c => !c.isWild);
+    const wilds    = available.filter(c => c.isWild);
+
+    // Sets: group naturals by rank.
+    const byRank = new Map<string, Card[]>();
+    for (const c of naturals) { byRank.set(c.rank, [...(byRank.get(c.rank) ?? []), c]); }
+    for (const grp of byRank.values()) {
+      consider(grp);
+      if (grp.length >= 2 && wilds.length > 0) consider([grp[0], grp[1], wilds[0]]);
+    }
+
+    // Runs: group naturals by suit.
+    const bySuit = new Map<string, Card[]>();
+    for (const c of naturals) { bySuit.set(c.suit, [...(bySuit.get(c.suit) ?? []), c]); }
+
+    for (const grp of bySuit.values()) {
+      for (const aceHigh of [false, true]) {
+        const toR   = (c: Card) => aceHigh && c.rank === 'A' ? 14 : rankOrder(c.rank);
+        const sorted = [...grp].sort((a, b) => toR(a) - toR(b));
+        // Skip Ace-high pass if no Ace in group.
+        if (aceHigh && !grp.some(c => c.rank === 'A')) continue;
+
+        for (let i = 0; i < sorted.length; i++) {
+          const seq: Card[] = [sorted[i]];
+          for (let j = i + 1; j < sorted.length; j++) {
+            if (toR(sorted[j]) - toR(seq[seq.length - 1]) === 1) seq.push(sorted[j]);
+            else break;
+          }
+          consider(seq);
+          if (wilds.length > 0) {
+            // Wild extends the sequence.
+            consider([...seq, wilds[0]]);
+            // Wild fills a 1-card gap to the next sorted card.
+            const nextIdx = i + seq.length;
+            if (nextIdx < sorted.length && toR(sorted[nextIdx]) - toR(seq[seq.length - 1]) === 2) {
+              consider([...seq, wilds[0], sorted[nextIdx]]);
+            }
+          }
+        }
+      }
+    }
+
+    return best;
+  }
+
+  /**
+   * Returns the hand index of the card the AI should discard — the least
+   * useful card that passes the legal-discard check.
+   */
+  private aiPickDiscardIndex(state: GameState, playerId: string, hand: Card[]): number {
+    if (hand.length === 0) return -1;
+    if (hand.length === 1) return this.pickLegalDiscardIndex(state, playerId, hand);
+
+    const teamId    = state.players.find(p => p.userId === playerId)?.teamId ?? 1;
+    const teamIds   = state.players.filter(p => p.teamId === teamId).map(p => p.userId);
+    const teamMelds = teamIds.flatMap(uid => state.melds[uid] || []);
+    const mode      = state.mode as string;
+
+    // Score each card — higher score = more useful = keep it.
+    const scores = hand.map((card, idx) => {
+      if (card.rank === 'JOKER') return { idx, score: 1000 };
+      if (card.rank === '2')     return { idx, score: 900 };
+
+      let score = 0;
+
+      // Extends an existing team meld.
+      if (teamMelds.some(m => canAddToMeld(m, [card], mode))) score += 500;
+
+      // Near-set: same-rank cards in hand.
+      const sameRank = hand.filter((c, i) => i !== idx && c.rank === card.rank && !c.isWild).length;
+      score += sameRank * 200;
+
+      // Near-run: a card within 2 ranks and same suit exists in hand.
+      const r = rankOrder(card.rank);
+      const nearRun = hand.some((c, i) => i !== idx && c.suit === card.suit && !c.isWild && Math.abs(rankOrder(c.rank) - r) <= 2);
+      if (nearRun) score += 150;
+
+      // Prefer discarding high-value isolated cards.
+      const pts = card.rank === 'A' ? 15
+                : ['K', 'Q', 'J', '10', '9', '8'].includes(card.rank) ? 10 : 5;
+      score -= pts;
+
+      return { idx, score };
+    });
+
+    // Sort ascending so the least useful (lowest score) comes first.
+    scores.sort((a, b) => a.score - b.score);
+
+    // Return the first candidate that passes the legal-discard guard.
+    for (const { idx } of scores) {
+      const single = [hand[idx]];
+      if (hand.length > 1) return idx; // multi-card hand: any card is legal to discard
+      // Length-1 case handled above via pickLegalDiscardIndex.
+    }
+    return scores[0].idx;
   }
 
   // ── Toss ───────────────────────────────────────────────────────────────────
