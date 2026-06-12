@@ -1270,7 +1270,7 @@ export class GameEngineService {
             await this.prisma.gameMove.create({
               data: { gameId, playerId, turnNumber: state.moveCount, moveType: MoveType.DRAW_STOCK, cardData: { auto: true, card: drawnCard as any }, isValid: true },
             });
-            const drawMove = { type: 'TIMEOUT_DRAW', playerId, cardId: drawnCard.id };
+            const drawMove = { type: 'TIMEOUT_DRAW', playerId, cardId: drawnCard.id, isAuto: true };
             this.socketService.emitToRoom(`game:${gameId}`, 'game:move_played', drawMove);
             await this.socketService.emitPerPlayer(`game:${gameId}`, 'game:state_updated', async (uid) => ({
               lastMove: drawMove,
@@ -1284,7 +1284,7 @@ export class GameEngineService {
     }
 
     if (drawnCard) {
-      const drawMove = { type: 'TIMEOUT_DRAW', playerId, cardId: drawnCard.id };
+      const drawMove = { type: 'TIMEOUT_DRAW', playerId, cardId: drawnCard.id, isAuto: true };
       this.socketService.emitToRoom(`game:${gameId}`, 'game:move_played', drawMove);
       await this.socketService.emitPerPlayer(`game:${gameId}`, 'game:state_updated', async (uid) => ({
         lastMove: drawMove,
@@ -1293,8 +1293,10 @@ export class GameEngineService {
     }
 
     // Smart play: lay down melds and extensions between draw and discard.
+    // Each meld/extension is emitted as its own game:state_updated so the client
+    // can animate them individually.
     if (useSmartPlay) {
-      this.aiApplyMeldsAndExtensions(state, playerId);
+      await this.aiApplyMeldsAndExtensions(state, gameId, playerId);
     }
 
     const discardIdx = useSmartPlay
@@ -1309,7 +1311,7 @@ export class GameEngineService {
       await this.redis.setJson(this.stateKey(gameId), state, 86400);
       if (!drawnCard) {
         await this.socketService.emitPerPlayer(`game:${gameId}`, 'game:state_updated', async (uid) => ({
-          lastMove: { type: 'TIMEOUT_ADVANCE', playerId },
+          lastMove: { type: 'TIMEOUT_ADVANCE', playerId, isAuto: true },
           ...this.buildClientView(state, uid),
         }));
       }
@@ -1328,7 +1330,7 @@ export class GameEngineService {
         await this.prisma.gameMove.create({
           data: { gameId, playerId, turnNumber: state.moveCount, moveType: MoveType.DISCARD, cardData: { auto: true, card: discardedCard as any, potAwarded: potAward }, isValid: true },
         });
-        const discardMove = { type: 'TIMEOUT_DISCARD', playerId, cardId: discardedCard.id, potAwarded: potAward };
+        const discardMove = { type: 'TIMEOUT_DISCARD', playerId, cardId: discardedCard.id, potAwarded: potAward, isAuto: true };
         this.socketService.emitToRoom(`game:${gameId}`, 'game:move_played', discardMove);
         await this.socketService.emitPerPlayer(`game:${gameId}`, 'game:state_updated', async (uid) => ({
           lastMove: discardMove,
@@ -1344,7 +1346,7 @@ export class GameEngineService {
       await this.prisma.gameMove.create({
         data: { gameId, playerId, turnNumber: state.moveCount, moveType: MoveType.DISCARD, cardData: { auto: true, card: discardedCard as any }, isValid: true },
       });
-      const discardMove = { type: 'TIMEOUT_DISCARD', playerId, cardId: discardedCard.id };
+      const discardMove = { type: 'TIMEOUT_DISCARD', playerId, cardId: discardedCard.id, isAuto: true };
       this.socketService.emitToRoom(`game:${gameId}`, 'game:move_played', discardMove);
       await this.socketService.emitPerPlayer(`game:${gameId}`, 'game:state_updated', async (uid) => ({
         lastMove: discardMove,
@@ -1363,7 +1365,7 @@ export class GameEngineService {
       data: { gameId, playerId, turnNumber: state.moveCount, moveType: MoveType.DISCARD, cardData: { auto: true, card: discardedCard as any }, isValid: true },
     });
 
-    const discardMove = { type: 'TIMEOUT_DISCARD', playerId, cardId: discardedCard.id };
+    const discardMove = { type: 'TIMEOUT_DISCARD', playerId, cardId: discardedCard.id, isAuto: true };
     this.socketService.emitToRoom(`game:${gameId}`, 'game:move_played', discardMove);
     await this.socketService.emitPerPlayer(`game:${gameId}`, 'game:state_updated', async (uid) => ({
       lastMove: discardMove,
@@ -1407,23 +1409,30 @@ export class GameEngineService {
   }
 
   /**
-   * Applies the best available new melds and meld extensions from the player's
-   * hand directly to the game state (no emit).  Called between draw and discard
-   * during smart auto-play so the final discard event carries the updated melds.
+   * Applies the best available new melds and meld extensions from the player's hand,
+   * emitting a separate game:state_updated per sub-move so the client can animate each
+   * step individually (spec §9 emission requirements).  Keeps ≥1 card for the discard.
    */
-  private aiApplyMeldsAndExtensions(state: GameState, playerId: string): void {
-    const hand         = state.hands[playerId];
-    const teamId       = state.players.find(p => p.userId === playerId)?.teamId ?? 1;
-    const teamIds      = state.players.filter(p => p.teamId === teamId).map(p => p.userId);
-    const mode         = state.mode as string;
+  private async aiApplyMeldsAndExtensions(state: GameState, gameId: string, playerId: string): Promise<void> {
+    const hand    = state.hands[playerId];
+    const teamId  = state.players.find(p => p.userId === playerId)?.teamId ?? 1;
+    const teamIds = state.players.filter(p => p.teamId === teamId).map(p => p.userId);
+    const mode    = state.mode as string;
 
-    // Helper: all melds that belong to the player's team.
     const teamMelds = () => teamIds.flatMap(uid => state.melds[uid] || []);
+
+    const emitMeldMove = async (lastMove: Record<string, unknown>) => {
+      this.socketService.emitToRoom(`game:${gameId}`, 'game:move_played', lastMove);
+      await this.socketService.emitPerPlayer(`game:${gameId}`, 'game:state_updated', async (uid) => ({
+        lastMove,
+        ...this.buildClientView(state, uid),
+      }));
+    };
 
     // 1 — Play new melds from hand (leave at least 1 card to discard).
     const newMelds = this.aiFindBestMeldsFromHand(hand, mode);
     for (const meldCards of newMelds) {
-      if (hand.length - meldCards.length < 1) continue; // keep 1 for discard
+      if (hand.length - meldCards.length < 1) continue;
       const validation = validateMeld(meldCards, mode);
       if (!validation.valid) continue;
 
@@ -1434,23 +1443,35 @@ export class GameEngineService {
 
       meldCards.forEach(c => { const i = hand.findIndex(x => x.id === c.id); if (i >= 0) hand.splice(i, 1); });
 
+      let affectedMeldId: string;
       if (mergeTarget) {
         mergeTarget.cards     = sortMeldCards([...mergeTarget.cards, ...sorted], type);
         mergeTarget.isCanasta = mergeTarget.cards.length >= 7;
         mergeTarget.isNatural = mergeTarget.cards.every(c => !c.isWild);
         const dirty           = computeMeldHasActingWild(mergeTarget.cards, type);
         mergeTarget.everDirty = state.mode === GameMode.PROFESSIONAL ? (mergeTarget.everDirty || dirty) : dirty;
+        affectedMeldId        = mergeTarget.id;
       } else {
         if (!state.melds[playerId]) state.melds[playerId] = [];
-        const dirty = computeMeldHasActingWild(sorted, type);
-        state.melds[playerId].push({
+        const dirty   = computeMeldHasActingWild(sorted, type);
+        const newMeld = {
           id: uuidv4(), teamId, type, cards: sorted,
           isNatural: sorted.every(c => !c.isWild), isCanasta: sorted.length >= 7, everDirty: dirty,
-        });
+        };
+        state.melds[playerId].push(newMeld);
+        affectedMeldId = newMeld.id;
       }
+
+      await emitMeldMove({
+        type: mergeTarget ? 'TIMEOUT_ADD_TO_MELD' : 'TIMEOUT_MELD',
+        playerId,
+        isAuto: true,
+        meldId:  affectedMeldId,
+        cardIds: meldCards.map(c => c.id),
+      });
     }
 
-    // 2 — Extend existing team melds (again keep ≥1 card).
+    // 2 — Extend existing team melds (keep ≥1 card).
     let improved = true;
     while (improved && hand.length > 1) {
       improved = false;
@@ -1458,13 +1479,21 @@ export class GameEngineService {
         for (let i = 0; i < hand.length; i++) {
           if (hand.length <= 1) break;
           if (!canAddToMeld(meld, [hand[i]], mode)) continue;
-          const [card] = hand.splice(i, 1);
+          const [card]   = hand.splice(i, 1);
           meld.cards     = sortMeldCards([...meld.cards, card], meld.type);
           meld.isCanasta = meld.cards.length >= 7;
           meld.isNatural = meld.cards.every(c => !c.isWild);
           const dirty    = computeMeldHasActingWild(meld.cards, meld.type);
           meld.everDirty = state.mode === GameMode.PROFESSIONAL ? (meld.everDirty || dirty) : dirty;
-          improved = true;
+          improved       = true;
+
+          await emitMeldMove({
+            type: 'TIMEOUT_ADD_TO_MELD',
+            playerId,
+            isAuto: true,
+            meldId:  meld.id,
+            cardIds: [card.id],
+          });
           break;
         }
       }
