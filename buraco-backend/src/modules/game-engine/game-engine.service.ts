@@ -409,18 +409,18 @@ export class GameEngineService {
 
         // ── Pre-meld Classic / Professional Direct checks ──────────────────────
         if (state.mode === GameMode.CLASSIC) {
-          // Classic always requires at least 1 card in hand to discard — no exceptions.
-          if (handAfterMeld.length === 0) {
-            const teamPotCount = (state.potCollectedByTeam ?? []).filter(id => id === playerTeamId).length;
-            const potAvailable = teamPotCount < 1 && state.potPiles.some(p => p.length > 0);
-            if (!potAvailable) {
-              throw new BadRequestException(
-                'Classic: cannot meld all cards — must leave at least one card to discard',
-              );
-            }
+          const teamPotCount = (state.potCollectedByTeam ?? []).filter(id => id === playerTeamId).length;
+          const potStillAvailable = teamPotCount < 1 && state.potPiles.some(p => p.length > 0);
+          // Before the pot is taken, melding/discarding to 0 is a pot pickup — always allow.
+          // After the pot, Classic requires at least 1 card left to discard.
+          if (handAfterMeld.length === 0 && !potStillAvailable) {
+            throw new BadRequestException(
+              'Classic: cannot meld all cards — must leave at least one card to discard',
+            );
           }
-          // Cannot leave a lone wild as last card — unless this play itself creates a Buraco
-          if (handAfterMeld.length === 1 && handAfterMeld[0].isWild && !thisMeldCreatesCanasta) {
+          // A lone wild is only invalid as a last card after the pot (would be an illegal close discard).
+          // Before the pot, the wild will be discarded to trigger pot pickup — allow it.
+          if (handAfterMeld.length === 1 && handAfterMeld[0].isWild && !thisMeldCreatesCanasta && !potStillAvailable) {
             throw new BadRequestException(
               'Classic: cannot leave a lone Joker or 2 as your last card',
             );
@@ -567,18 +567,14 @@ export class GameEngineService {
         const addCreatesCanasta = meld.cards.length + cards.length >= 7;
 
         if (state.mode === GameMode.CLASSIC) {
-          // Classic always requires ≥1 card in hand — no exceptions
-          if (handAfterAdd.length === 0) {
-            const teamPotCount = (state.potCollectedByTeam ?? []).filter(id => id === playerTeamId).length;
-            const potAvailable = teamPotCount < 1 && state.potPiles.some(p => p.length > 0);
-            if (!potAvailable) {
-              throw new BadRequestException(
-                'Classic: cannot play all cards — must leave at least one card to discard',
-              );
-            }
+          const teamPotCount = (state.potCollectedByTeam ?? []).filter(id => id === playerTeamId).length;
+          const potStillAvailable = teamPotCount < 1 && state.potPiles.some(p => p.length > 0);
+          if (handAfterAdd.length === 0 && !potStillAvailable) {
+            throw new BadRequestException(
+              'Classic: cannot play all cards — must leave at least one card to discard',
+            );
           }
-          // Cannot leave lone wild unless this add itself creates a Buraco
-          if (handAfterAdd.length === 1 && handAfterAdd[0].isWild && !addCreatesCanasta) {
+          if (handAfterAdd.length === 1 && handAfterAdd[0].isWild && !addCreatesCanasta && !potStillAvailable) {
             throw new BadRequestException(
               'Classic: cannot leave a lone Joker or 2 as your last card',
             );
@@ -829,12 +825,15 @@ export class GameEngineService {
 
     const targetScore = state.targetScore ?? 0;
     const matchEnded =
+      !!buracoOfTwos ||
       targetScore === 0 ||
       state.matchScores[1] >= targetScore ||
       state.matchScores[2] >= targetScore;
 
     if (matchEnded) {
-      const winnerTeam = state.matchScores[1] >= state.matchScores[2] ? 1 : 2;
+      const winnerTeam = (buracoOfTwos && closerTeamId !== undefined)
+        ? closerTeamId
+        : (state.matchScores[1] >= state.matchScores[2] ? 1 : 2);
       const winnerIds  = state.players.filter(p => p.teamId === winnerTeam).map(p => p.userId);
       const duration   = Math.floor((Date.now() - state.gameStartedAt) / 1000);
 
