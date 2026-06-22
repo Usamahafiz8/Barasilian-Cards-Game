@@ -43,6 +43,49 @@ function isSemiCleanClassic(meld: Meld): boolean {
   return meld.cards[0].isWild || meld.cards[meld.cards.length - 1].isWild;
 }
 
+export interface ScoreBreakdown {
+  boardScore: number;
+  cleanBuraco: number;
+  semiCleanBuraco: number;
+  dirtyBuraco: number;
+  buracoBonus: number;
+  paidCards: number;
+  finishBonus: number;
+  potNotTaken: number;
+  total: number;
+}
+
+export function calculateScoreBreakdown(
+  melds: Meld[],
+  hand: Card[],
+  mode: GameMode,
+  finishBonus = 0,
+  potNotTaken = 0,
+): ScoreBreakdown {
+  const isPro = mode === GameMode.PROFESSIONAL;
+  let boardScore = 0;
+  let cleanBuraco = 0;
+  let semiCleanBuraco = 0;
+  let dirtyBuraco = 0;
+  let buracoBonus = 0;
+
+  for (const meld of melds) {
+    for (const card of meld.cards) boardScore += cardValue(card, isPro);
+    const bonus = buracBonus(meld, mode);
+    buracoBonus += bonus;
+    if (meld.cards.length >= 7) {
+      if (bonus === 200) cleanBuraco++;
+      else if (bonus === 150) semiCleanBuraco++;
+      else dirtyBuraco++;
+    }
+  }
+
+  const paidCards = hand.reduce((s, c) => s + cardValue(c, isPro), 0);
+  const total = boardScore - paidCards + buracoBonus + finishBonus + potNotTaken;
+
+  return { boardScore, cleanBuraco, semiCleanBuraco, dirtyBuraco, buracoBonus, paidCards, finishBonus, potNotTaken, total };
+}
+
 export function calculateScore(melds: Meld[], hand: Card[], mode: GameMode = GameMode.CLASSIC): number {
   const isPro = mode === GameMode.PROFESSIONAL;
   let score = 0;

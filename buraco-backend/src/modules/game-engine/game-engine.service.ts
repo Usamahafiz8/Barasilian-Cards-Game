@@ -19,7 +19,7 @@ import {
   computeMeldHasActingWild,
   Meld,
 } from './buraco/rules';
-import { calculateScore, calculateMatchReward } from './buraco/scoring';
+import { calculateScore, calculateMatchReward, calculateScoreBreakdown } from './buraco/scoring';
 import { SocketService } from '../../common/socket/socket.service';
 
 export type TurnPhase = 'MUST_DRAW' | 'CAN_MELD_OR_DISCARD' | 'ROUND_ENDED';
@@ -992,7 +992,32 @@ export class GameEngineService {
 
     await this.redis.setJson(this.stateKey(gameId), state, 86400);
 
-    const lastRoundScores = { ...roundScores };
+    // Build per-team breakdown from the final hand/meld state of the completed round.
+    // Both pot-penalty and finish-bonus are already reflected in roundScores but are
+    // included explicitly in the breakdown so the client scoreboard can show them.
+    const teamBreakdowns: Record<number, ReturnType<typeof calculateScoreBreakdown>> = {};
+    for (const teamId of [1, 2]) {
+      const teamPlayers = state.players.filter(p => p.teamId === teamId);
+      const allMelds = teamPlayers.flatMap(p => state.melds[p.userId] || []);
+      const allHand  = teamPlayers.flatMap(p => state.hands[p.userId] || []);
+      teamBreakdowns[teamId] = calculateScoreBreakdown(
+        allMelds,
+        allHand,
+        state.mode,
+        closerTeamId === teamId ? 100 : 0,
+        collectedTeams.includes(teamId) ? 0 : -100,
+      );
+    }
+
+    const lastRoundScores = state.players.map(p => ({
+      playerId:   p.userId,
+      playerName: state.usernames?.[p.userId] ?? '',
+      teamId:     p.teamId,
+      roundScore: roundScores[p.teamId] ?? 0,
+      matchScore: state.matchScores[p.teamId] ?? 0,
+      breakdown:  teamBreakdowns[p.teamId],
+    }));
+
     await this.socketService.emitPerPlayer(`game:${gameId}`, 'game:new_round', async (uid) => ({
       lastRoundScores,
       ...this.buildClientView(state, uid),
@@ -1167,6 +1192,12 @@ export class GameEngineService {
     // Stop AI takeover the moment the player is back — reset their auto-play counter.
     if (!state.consecutiveMissedTurns) state.consecutiveMissedTurns = {};
     state.consecutiveMissedTurns[userId] = 0;
+    // If the timer already expired while this player was away and it is still their
+    // turn, give them a fresh full-duration window so the next cron tick does not
+    // immediately auto-play on their behalf.
+    if (state.status === GameStatus.IN_PROGRESS && state.turnOrder[state.currentTurnIndex] === userId) {
+      state.turnStartedAt = Date.now();
+    }
     await this.redis.setJson(this.stateKey(gameId), state, 86400);
   }
 
