@@ -6,7 +6,7 @@ import { PrismaService } from '../../common/prisma/prisma.service';
 import { RedisService } from '../../common/redis/redis.service';
 import { EconomyService } from '../economy/economy.service';
 import { StatsService } from '../stats/stats.service';
-import { generateDeck, shuffle, Card, tossRankValue, rankOrder } from './buraco/deck';
+import { generateDeck, shuffle, Card, tossRankValue, rankOrder, cardValue } from './buraco/deck';
 import {
   validateMeld,
   canAddToMeld,
@@ -23,6 +23,15 @@ import { calculateScore, calculateMatchReward } from './buraco/scoring';
 import { SocketService } from '../../common/socket/socket.service';
 
 export type TurnPhase = 'MUST_DRAW' | 'CAN_MELD_OR_DISCARD' | 'ROUND_ENDED';
+
+export interface SeventyFiveRuleState {
+  /** True when this player's team cumulative score was >= 1000 at round start. */
+  active: boolean;
+  /** Current minimum point total required for the first meld; starts at 75, +20 per failed attempt. */
+  requirement: number;
+  /** True once the player has placed a first meld worth >= requirement (or if rule is inactive). */
+  satisfied: boolean;
+}
 
 export interface TossEntry {
   playerId: string;
@@ -86,10 +95,10 @@ export interface GameState {
   targetScore: number;
   matchScores: Record<number, number>;
   winnerTeam?: number;
-  /** Number of auto-played turns accumulated per player while disconnected. */
-  disconnectedMoves?: Record<string, number>;
-  /** Consecutive auto-played turns per player; resets to 0 on any manual action. */
+  /** Consecutive auto-played turns per player; resets to 0 on any manual action or reconnect. */
   consecutiveMissedTurns?: Record<string, number>;
+  /** Per-player 75-rule state for the current round. */
+  seventyFiveRule?: Record<string, SeventyFiveRuleState>;
 }
 
 @Injectable()
@@ -113,11 +122,7 @@ export class GameEngineService {
           const state = await this.redis.getJson<GameState>(key);
           if (!state || state.status !== GameStatus.IN_PROGRESS) return;
           if (state.turnPhase === 'ROUND_ENDED') return;
-          const playerId   = state.turnOrder[state.currentTurnIndex];
-          const missed     = state.consecutiveMissedTurns?.[playerId] ?? 0;
-          // Confirmed-inactive players (already missed ≥1 turn) get a fast 5 s timer.
-          const thresholdMs = (missed >= 1 ? 5 : state.turnDuration) * 1000;
-          if (Date.now() - state.turnStartedAt > thresholdMs) {
+          if (Date.now() - state.turnStartedAt > state.turnDuration * 1000) {
             await this.handleTurnTimeout(state.gameId);
           }
         }),
@@ -229,6 +234,12 @@ export class GameEngineService {
       toss: tossResult,
       setupComplete: true,
       tossComplete: true,
+      consecutiveMissedTurns: {},
+      // Round 1: all matchScores are 0 → 75-rule inactive for everyone
+      seventyFiveRule: Object.fromEntries(players.map(p => [
+        p.userId,
+        { active: false, requirement: 75, satisfied: true },
+      ])),
     };
 
     await this.redis.setJson(this.stateKey(game.id), state, 86400);
@@ -398,6 +409,24 @@ export class GameEngineService {
         if (!validation.valid) throw new BadRequestException(validation.reason || 'INVALID_MELD');
         const meldType = validation.type!;
 
+        // ── 75-rule: first meld this round must be worth >= required points ────
+        {
+          const rule = state.seventyFiveRule?.[playerId];
+          if (rule?.active && !rule.satisfied) {
+            const isPro = state.mode === GameMode.PROFESSIONAL;
+            const pts   = cards.reduce((s, c) => s + cardValue(c, isPro), 0);
+            if (pts < rule.requirement) {
+              const req = rule.requirement;
+              rule.requirement += 20;
+              await this.redis.setJson(this.stateKey(gameId), state, 86400);
+              throw new BadRequestException(
+                `75-rule: minimum ${req} points required. Selected cards are ${pts} points, short by ${req - pts}. Penalty applied; next minimum is ${rule.requirement}.`,
+              );
+            }
+            rule.satisfied = true;
+          }
+        }
+
         // ── Lookahead: find merge target early (needed for Buraco-exception guard) ─
         const handAfterMeld = hand.filter(c => !cards.some(mc => mc.id === c.id));
         const allTeamMelds = teamPlayerIds.flatMap(uid => state.melds[uid] || []);
@@ -560,6 +589,24 @@ export class GameEngineService {
         const cards = this.resolveCards(hand, move.cardIds || []);
         if (!canAddToMeld(meld, cards, state.mode as string)) {
           throw new BadRequestException('Cannot add those cards to this meld');
+        }
+
+        // ── 75-rule: first meld attempt this round must be worth >= required points
+        {
+          const rule = state.seventyFiveRule?.[playerId];
+          if (rule?.active && !rule.satisfied) {
+            const isPro = state.mode === GameMode.PROFESSIONAL;
+            const pts   = cards.reduce((s, c) => s + cardValue(c, isPro), 0);
+            if (pts < rule.requirement) {
+              const req = rule.requirement;
+              rule.requirement += 20;
+              await this.redis.setJson(this.stateKey(gameId), state, 86400);
+              throw new BadRequestException(
+                `75-rule: minimum ${req} points required. Selected cards are ${pts} points, short by ${req - pts}. Penalty applied; next minimum is ${rule.requirement}.`,
+              );
+            }
+            rule.satisfied = true;
+          }
         }
 
         // ── Pre-add Classic / Professional Direct checks ─────────────────────
@@ -779,6 +826,9 @@ export class GameEngineService {
         if (!state.potCollectedByTeam) state.potCollectedByTeam = [];
         state.potCollectedByTeam.push(playerTeamId);
 
+        // Player continues their turn with the new hand — reset the turn timer
+        state.turnStartedAt = Date.now();
+
         result = { handCount: hand.length, potCollectedByTeam: state.potCollectedByTeam };
         break;
       }
@@ -896,6 +946,7 @@ export class GameEngineService {
         roundScores,
         duration,
         buracoOfTwos: !!buracoOfTwos,
+        reason: buracoOfTwos ? 'buraco_of_twos' : 'target_score_reached',
       };
       this.socketService.emitToRoom(`game:${gameId}`, 'game:end', endPayload);
       return { winnerTeam, winnerIds, scores: state.matchScores, roundScores, duration, buracoOfTwos: !!buracoOfTwos };
@@ -930,6 +981,14 @@ export class GameEngineService {
     state.turnPhase   = 'MUST_DRAW';
     state.turnStartedAt = Date.now();
     state.toss        = null; // no toss animation for round ≥ 2
+    state.consecutiveMissedTurns = {};
+
+    // Re-evaluate 75-rule for every player using the updated cumulative match scores
+    state.seventyFiveRule = Object.fromEntries(state.players.map(p => {
+      const teamScore = state.matchScores[p.teamId] ?? 0;
+      const active    = teamScore >= 1000;
+      return [p.userId, { active, requirement: 75, satisfied: !active }];
+    }));
 
     await this.redis.setJson(this.stateKey(gameId), state, 86400);
 
@@ -1096,8 +1155,6 @@ export class GameEngineService {
     const player = state.players.find(p => p.userId === userId);
     if (!player) return;
     player.isConnected = false;
-    if (!state.disconnectedMoves) state.disconnectedMoves = {};
-    if (state.disconnectedMoves[userId] === undefined) state.disconnectedMoves[userId] = 0;
     await this.redis.setJson(this.stateKey(gameId), state, 86400);
   }
 
@@ -1107,38 +1164,48 @@ export class GameEngineService {
     const player = state.players.find(p => p.userId === userId);
     if (!player) return;
     player.isConnected = true;
+    // Stop AI takeover the moment the player is back — reset their auto-play counter.
+    if (!state.consecutiveMissedTurns) state.consecutiveMissedTurns = {};
+    state.consecutiveMissedTurns[userId] = 0;
     await this.redis.setJson(this.stateKey(gameId), state, 86400);
   }
 
-  private async handleDisconnectedTurn(
-    state: GameState,
-    gameId: string,
-    playerId: string,
-  ): Promise<boolean> {
-    const player = state.players.find(p => p.userId === playerId);
-    if (!player || player.isConnected !== false) return false;
-
-    if (!state.disconnectedMoves) state.disconnectedMoves = {};
-    state.disconnectedMoves[playerId] = (state.disconnectedMoves[playerId] ?? 0) + 1;
-
-    if (state.disconnectedMoves[playerId] < 12) {
-      await this.redis.setJson(this.stateKey(gameId), state, 86400);
-      return false;
-    }
-
-    await this.forfeitDisconnectedPlayer(gameId, playerId, state);
+  /**
+   * After each auto-played turn, check whether the player has reached 12 consecutive
+   * auto-plays (IDLE or DISCONNECTED) and forfeit them if so.
+   * Returns true if a forfeit was triggered (caller should return immediately).
+   */
+  private async checkAndForfeit(gameId: string, playerId: string, state: GameState): Promise<boolean> {
+    const missed = state.consecutiveMissedTurns?.[playerId] ?? 0;
+    if (missed < 12) return false;
+    const isDisconnected = !(state.players.find(p => p.userId === playerId)?.isConnected ?? true);
+    await this.forfeitPlayer(
+      gameId, playerId, state,
+      isDisconnected ? 'player_abandoned' : 'inactive_forfeit',
+    );
     return true;
   }
 
-  private async forfeitDisconnectedPlayer(
+  /**
+   * Forfeit the given player after 12 consecutive auto-played turns.
+   * Works for both IDLE (connected but inactive) and DISCONNECTED players.
+   * Uses a Redis lock to prevent double-firing from concurrent cron ticks.
+   */
+  private async forfeitPlayer(
     gameId: string,
     forfeitingUserId: string,
     state: GameState,
+    reason: 'inactive_forfeit' | 'player_abandoned',
   ): Promise<void> {
     if (state.status !== GameStatus.IN_PROGRESS) return;
 
+    // Atomic lock: only one concurrent cron tick may execute the forfeit
+    const lockKey = `game:${gameId}:ending`;
+    const locked  = await this.redis.setNx(lockKey, '1', 30);
+    if (!locked) return;
+
     const forfeiter = state.players.find(p => p.userId === forfeitingUserId);
-    if (!forfeiter) return;
+    if (!forfeiter) { await this.redis.del(lockKey); return; }
 
     const winnerTeam = forfeiter.teamId === 1 ? 2 : 1;
     const winnerIds  = state.players.filter(p => p.teamId === winnerTeam).map(p => p.userId);
@@ -1207,7 +1274,7 @@ export class GameEngineService {
       winnerIds,
       scores,
       duration,
-      reason: 'opponent_forfeit',
+      reason,
     });
   }
 
@@ -1314,7 +1381,7 @@ export class GameEngineService {
           ...this.buildClientView(state, uid),
         }));
       }
-      if (await this.handleDisconnectedTurn(state, gameId, playerId)) return;
+      if (await this.checkAndForfeit(gameId, playerId, state)) return;
       return { playerId, autoAction: 'ADVANCE_NO_DISCARD' };
     }
 
@@ -1335,7 +1402,7 @@ export class GameEngineService {
           lastMove: discardMove,
           ...this.buildClientView(state, uid),
         }));
-        if (await this.handleDisconnectedTurn(state, gameId, playerId)) return;
+        if (await this.checkAndForfeit(gameId, playerId, state)) return;
         return { playerId, autoAction: drawnCard ? 'DRAW_THEN_DISCARD' : 'DISCARD', card: discardedCard };
       }
 
@@ -1371,7 +1438,7 @@ export class GameEngineService {
       ...this.buildClientView(state, uid),
     }));
 
-    if (await this.handleDisconnectedTurn(state, gameId, playerId)) return;
+    if (await this.checkAndForfeit(gameId, playerId, state)) return;
     return { playerId, autoAction: drawnCard ? 'DRAW_THEN_DISCARD' : 'DISCARD', card: discardedCard };
   }
 
@@ -1631,7 +1698,8 @@ export class GameEngineService {
   // ── Toss ───────────────────────────────────────────────────────────────────
 
   private runToss(playerIds: string[], seatMap: Record<string, number>): TossResult {
-    let tossDeck = shuffle(generateDeck(false));
+    // Include jokers: Joker is the highest toss card (15 > Ace=14 > King=13 > … > 2=2)
+    let tossDeck = shuffle(generateDeck(true));
     const rounds: TossRound[] = [];
     let winnerPlayerId: string | null = null;
     let winnerSeatIndex = 0;
@@ -1642,11 +1710,8 @@ export class GameEngineService {
       const entries: TossEntry[] = [];
 
       for (const pid of playerIds) {
-        let card = tossDeck.pop();
-        while (!card || tossRankValue(card.rank) === 0) {
-          if (tossDeck.length === 0) tossDeck = shuffle(generateDeck(false));
-          card = tossDeck.pop();
-        }
+        if (tossDeck.length === 0) tossDeck = shuffle(generateDeck(true));
+        const card = tossDeck.pop()!;
         entries.push({ playerId: pid, seatIndex: seatMap[pid], card, rankValue: tossRankValue(card.rank) });
       }
 
@@ -1733,6 +1798,10 @@ export class GameEngineService {
       state.currentTurnIndex = (state.currentTurnIndex + 1) % state.turnOrder.length;
       state.turnStartedAt    = Date.now();
       state.turnPhase        = 'MUST_DRAW';
+    } else {
+      // On-the-fly pot pickup (PLAY_MELD / ADD_TO_MELD): player continues their turn
+      // with a fresh hand — reset the turn timer so they have the full duration.
+      state.turnStartedAt = Date.now();
     }
 
     return { playerId, teamId, potIndex, cardCount: potCards.length, cardIds: potCards.map(c => c.id) };

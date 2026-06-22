@@ -65,9 +65,9 @@ export function rankOrder(rank: Rank): number {
   return order[rank];
 }
 
-// Used for toss: Ace is high (14). Wilds (2, Joker) return 0 so they are skipped/redrawn.
+// Used for toss: Joker > Ace > King > … > 2 (Joker=15, Ace=14, 2=2).
 export function tossRankValue(rank: Rank): number {
-  if (rank === 'JOKER' || rank === '2') return 0;
+  if (rank === 'JOKER') return 15;
   if (rank === 'A') return 14;
-  return rankOrder(rank); // 3–13
+  return rankOrder(rank); // K=13 … 2=2
 }

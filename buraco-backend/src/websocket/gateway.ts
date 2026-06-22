@@ -237,14 +237,13 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
     socket.join(`game:${data.gameId}`);
     await this.redis.set(`user:${userId}:activeGame`, data.gameId, 86400);
     await this.reconnection.setActiveGame(userId, data.gameId);
-    // In case this join is a reconnect path, clear any disconnected flag
+    // Mark player back — resets consecutiveMissedTurns and isConnected so AI stops.
     await this.gameEngine.markPlayerReconnected(data.gameId, userId);
 
-    // Emit full setup sequence so Unity can animate toss then deal.
     try {
       const view = await this.gameEngine.getGameState(data.gameId, userId);
 
-      // 1 — stable seat map (same payload for every player)
+      // 1 — stable seat map (same for every player, fresh join or reconnect)
       const seatMap = view.players
         .map((p) => ({
           playerId: p.userId,
@@ -263,13 +262,28 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
         currentTurnIndex: view.currentTurnIndex,
       });
 
-      // 2 — toss result (Unity animates cards, shows winner)
-      if (view.toss) {
-        socket.emit('game:toss_result', { gameId: data.gameId, toss: view.toss });
+      if (view.moveCount > 0) {
+        // Mid-game cold relaunch: snap client to current state, don't replay deal animation.
+        socket.emit('game:state_sync', view);
+      } else {
+        // Fresh game start: animate toss rounds then deal.
+        // Emit each toss round individually — client ignores isTie:true and waits
+        // for the decisive isTie:false result (per connection spec §B.1).
+        if (view.toss) {
+          for (const round of (view.toss as any).rounds ?? []) {
+            socket.emit('game:toss_result', {
+              gameId:           data.gameId,
+              players:          round.players,
+              winnerPlayerId:   round.winnerPlayerId  ?? null,
+              winnerSeatIndex:  round.winnerSeatIndex ?? null,
+              isTie:            round.isTie,
+              round:            round.round,
+            });
+          }
+        }
+        // 3 — authoritative deal state (Unity animates real hand, not placeholder cards)
+        socket.emit('game:deal_start', view);
       }
-
-      // 3 — authoritative deal state (Unity animates real hand, not fake cards)
-      socket.emit('game:deal_start', view);
     } catch (err) {
       this.logger.error(`game:join setup failed for ${userId} in game ${data.gameId}`, err);
     }
