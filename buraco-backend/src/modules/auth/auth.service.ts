@@ -211,10 +211,19 @@ export class AuthService {
     const stored = await this.prisma.refreshToken.findUnique({ where: { tokenHash: hash } });
     if (!stored || stored.expiresAt < new Date()) throw new UnauthorizedException('INVALID_REFRESH_TOKEN');
 
-    // Rotate: delete old, issue new
+    const user = await this.prisma.user.findUnique({ where: { id: payload.sub } });
+    if (!user || user.isBanned || user.isDeleted) throw new UnauthorizedException('INVALID_REFRESH_TOKEN');
+
+    // Fully rotate: delete the consumed token, issue a fresh pair.
     await this.prisma.refreshToken.delete({ where: { tokenHash: hash } });
-    const accessToken = this.signAccessToken(payload.sub, payload.email);
-    return { accessToken, expiresIn: 900 };
+    const accessToken    = this.signAccessToken(payload.sub, payload.email ?? user.email ?? '');
+    const newRefreshToken = this.signRefreshToken(payload.sub, payload.email ?? user.email ?? '');
+    const newHash = this.hashToken(newRefreshToken);
+    const expiresAt = new Date();
+    expiresAt.setDate(expiresAt.getDate() + 30);
+    await this.prisma.refreshToken.create({ data: { userId: payload.sub, tokenHash: newHash, expiresAt } });
+
+    return { accessToken, refreshToken: newRefreshToken, expiresIn: 900, user: this.sanitizeUser(user) };
   }
 
   async logout(userId: string, token: string) {
