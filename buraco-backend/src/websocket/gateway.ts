@@ -76,6 +76,13 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
       await this.redis.set(`online:${payload.sub}`, '1', 30);
       this.logger.log(`User ${payload.sub} connected: ${socket.id}`);
       socket.emit('connect_ack', { userId: payload.sub, socketId: socket.id });
+
+      // Auto-rejoin the active game room so broadcasts from ongoing moves reach
+      // this socket immediately, without waiting for the client to emit game:reconnect.
+      const activeGameId = await this.redis.get(`user:${payload.sub}:activeGame`);
+      if (activeGameId) {
+        socket.join(`game:${activeGameId}`);
+      }
     } catch {
       socket.emit('error', { code: 'AUTH_FAILED', message: 'Invalid or expired token' });
       socket.disconnect();

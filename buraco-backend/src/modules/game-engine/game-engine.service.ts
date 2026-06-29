@@ -1,6 +1,8 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
-import { GameMode, GameStatus, GameVariant, MoveType } from '@prisma/client';
+import { GameMode, GameStatus, GameVariant, MoveType, RoomStatus } from '@prisma/client';
+
+const INACTIVE_FAST_AUTOPLAY_SECONDS = 5;
 import { v4 as uuidv4 } from 'uuid';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { RedisService } from '../../common/redis/redis.service';
@@ -95,8 +97,19 @@ export interface GameState {
   targetScore: number;
   matchScores: Record<number, number>;
   winnerTeam?: number;
-  /** Consecutive auto-played turns per player; resets to 0 on any manual action or reconnect. */
+  /**
+   * Cadence counter — consecutive auto-played turns per player.
+   * Resets to 0 on any manual action OR bare reconnect.
+   * When ≥ 1 at the start of a turn, the server uses INACTIVE_FAST_AUTOPLAY_SECONDS
+   * instead of the full turnDuration before auto-playing.
+   */
   consecutiveMissedTurns?: Record<string, number>;
+  /**
+   * Forfeit counter — consecutive auto-played turns per player.
+   * Resets to 0 ONLY on a manual move (not bare reconnect).
+   * Reaches 12 → forfeit, same semantics as the original single counter.
+   */
+  forfeitMissedTurns?: Record<string, number>;
   /** Per-player 75-rule state for the current round. */
   seventyFiveRule?: Record<string, SeventyFiveRuleState>;
 }
@@ -122,7 +135,10 @@ export class GameEngineService {
           const state = await this.redis.getJson<GameState>(key);
           if (!state || state.status !== GameStatus.IN_PROGRESS) return;
           if (state.turnPhase === 'ROUND_ENDED') return;
-          if (Date.now() - state.turnStartedAt > state.turnDuration * 1000) {
+          const currentPlayerId = state.turnOrder[state.currentTurnIndex];
+          const cadence = (state.consecutiveMissedTurns ?? {})[currentPlayerId] ?? 0;
+          const effectiveTimeout = cadence >= 1 ? INACTIVE_FAST_AUTOPLAY_SECONDS : state.turnDuration;
+          if (Date.now() - state.turnStartedAt > effectiveTimeout * 1000) {
             await this.handleTurnTimeout(state.gameId);
           }
         }),
@@ -235,6 +251,7 @@ export class GameEngineService {
       setupComplete: true,
       tossComplete: true,
       consecutiveMissedTurns: {},
+      forfeitMissedTurns: {},
       // Round 1: all matchScores are 0 → 75-rule inactive for everyone
       seventyFiveRule: Object.fromEntries(players.map(p => [
         p.userId,
@@ -315,7 +332,11 @@ export class GameEngineService {
       targetScore:          state.targetScore ?? 0,
       matchScores:          state.matchScores ?? { 1: 0, 2: 0 },
       winnerTeam:           state.winnerTeam ?? null,
-      turnTimeRemaining:    Math.max(0, state.turnDuration - Math.floor((Date.now() - state.turnStartedAt) / 1000)),
+      turnTimeRemaining: (() => {
+        const cadence = (state.consecutiveMissedTurns ?? {})[currentPlayerId] ?? 0;
+        const effective = cadence >= 1 ? INACTIVE_FAST_AUTOPLAY_SECONDS : state.turnDuration;
+        return Math.max(0, effective - Math.floor((Date.now() - state.turnStartedAt) / 1000));
+      })(),
     };
   }
 
@@ -331,9 +352,11 @@ export class GameEngineService {
     const currentPlayer = state.turnOrder[state.currentTurnIndex];
     if (currentPlayer !== playerId) throw new BadRequestException('NOT_YOUR_TURN');
 
-    // Any successful manual move resets the consecutive-miss counter for this player.
+    // Any successful manual move resets both the cadence counter and the forfeit counter.
     if (!state.consecutiveMissedTurns) state.consecutiveMissedTurns = {};
     state.consecutiveMissedTurns[playerId] = 0;
+    if (!state.forfeitMissedTurns) state.forfeitMissedTurns = {};
+    state.forfeitMissedTurns[playerId] = 0;
 
     const turnPhase: TurnPhase = state.turnPhase ?? 'MUST_DRAW';
     const hand = state.hands[playerId];
@@ -938,6 +961,8 @@ export class GameEngineService {
         await this.economyService.distributeMatchReward(p.userId, gameId, reward.coins);
       }));
 
+      await this.resetRoomAfterGame(gameId, state.players.map(p => p.userId));
+
       const endPayload = {
         gameId,
         winnerTeam,
@@ -982,6 +1007,7 @@ export class GameEngineService {
     state.turnStartedAt = Date.now();
     state.toss        = null; // no toss animation for round ≥ 2
     state.consecutiveMissedTurns = {};
+    state.forfeitMissedTurns     = {};
 
     // Re-evaluate 75-rule for every player using the updated cumulative match scores
     state.seventyFiveRule = Object.fromEntries(state.players.map(p => {
@@ -1156,6 +1182,7 @@ export class GameEngineService {
     );
 
     await this.redis.del(this.stateKey(gameId));
+    await this.resetRoomAfterGame(gameId, state.players.map(p => p.userId));
     return { winnerTeam, winnerIds, scores, duration };
   }
 
@@ -1207,7 +1234,7 @@ export class GameEngineService {
    * Returns true if a forfeit was triggered (caller should return immediately).
    */
   private async checkAndForfeit(gameId: string, playerId: string, state: GameState): Promise<boolean> {
-    const missed = state.consecutiveMissedTurns?.[playerId] ?? 0;
+    const missed = state.forfeitMissedTurns?.[playerId] ?? state.consecutiveMissedTurns?.[playerId] ?? 0;
     if (missed < 12) return false;
     const isDisconnected = !(state.players.find(p => p.userId === playerId)?.isConnected ?? true);
     await this.forfeitPlayer(
@@ -1307,6 +1334,8 @@ export class GameEngineService {
       duration,
       reason,
     });
+
+    await this.resetRoomAfterGame(gameId, state.players.map(p => p.userId));
   }
 
   async handleTurnTimeout(gameId: string) {
@@ -1322,6 +1351,8 @@ export class GameEngineService {
     if (!state.consecutiveMissedTurns) state.consecutiveMissedTurns = {};
     const priorMissed = state.consecutiveMissedTurns[playerId] ?? 0;
     state.consecutiveMissedTurns[playerId] = priorMissed + 1;
+    if (!state.forfeitMissedTurns) state.forfeitMissedTurns = {};
+    state.forfeitMissedTurns[playerId] = (state.forfeitMissedTurns[playerId] ?? 0) + 1;
     // Smart play activates on the second and subsequent misses (priorMissed ≥ 1).
     const useSmartPlay = priorMissed >= 1;
 
@@ -1836,6 +1867,37 @@ export class GameEngineService {
     }
 
     return { playerId, teamId, potIndex, cardCount: potCards.length, cardIds: potCards.map(c => c.id) };
+  }
+
+  /**
+   * On every game end path (normal finish, forfeit, resign), reset the room so
+   * the lobby shows it as joinable again and players are fully released.
+   */
+  private async resetRoomAfterGame(gameId: string, playerIds: string[]): Promise<void> {
+    // Clear activeGame for all participants regardless of connection status.
+    await Promise.all(playerIds.map(id => this.redis.del(`user:${id}:activeGame`)));
+
+    // Update the room row back to EMPTY so it no longer lingers as IN_PROGRESS.
+    try {
+      const session = await this.prisma.gameSession.findUnique({
+        where: { id: gameId },
+        select: { roomId: true },
+      });
+      if (session?.roomId) {
+        await this.prisma.room.update({
+          where: { id: session.roomId },
+          data: { status: RoomStatus.EMPTY, currentPlayers: 0, gameId: null },
+        });
+        this.socketService.emitToRoom('room_lobby', 'room:list_updated', {
+          roomId: session.roomId,
+          status: 'EMPTY',
+          currentPlayers: 0,
+          seatList: [],
+        });
+      }
+    } catch {
+      // Room may have already been cleaned up; non-fatal
+    }
   }
 
   private resolveCards(hand: Card[], cardIds: string[]): Card[] {
