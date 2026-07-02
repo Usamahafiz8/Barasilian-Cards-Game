@@ -522,6 +522,8 @@ model Room {
 
   game GameSession? @relation(fields: [gameId], references: [id])
 
+  @@index([isDefaultTable, status])
+  @@index([status])
   @@map("rooms")
 }
 

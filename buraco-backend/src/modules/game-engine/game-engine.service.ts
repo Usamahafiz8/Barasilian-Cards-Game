@@ -112,6 +112,19 @@ export interface GameState {
   forfeitMissedTurns?: Record<string, number>;
   /** Per-player 75-rule state for the current round. */
   seventyFiveRule?: Record<string, SeventyFiveRuleState>;
+  /**
+   * Per-player score breakdown for the most recently completed round, persisted so that
+   * any client resyncing via getGameState/buildClientView (e.g. after a reconnect that
+   * missed the one-shot 'game:new_round' event) still receives the correct round score.
+   */
+  lastRoundScores?: Array<{
+    playerId: string;
+    playerName: string;
+    teamId: number;
+    roundScore: number;
+    matchScore: number;
+    breakdown: ReturnType<typeof calculateScoreBreakdown>;
+  }>;
 }
 
 @Injectable()
@@ -332,6 +345,7 @@ export class GameEngineService {
       targetScore:          state.targetScore ?? 0,
       matchScores:          state.matchScores ?? { 1: 0, 2: 0 },
       winnerTeam:           state.winnerTeam ?? null,
+      lastRoundScores:      state.lastRoundScores ?? [],
       turnTimeRemaining: (() => {
         const cadence = (state.consecutiveMissedTurns ?? {})[currentPlayerId] ?? 0;
         const effective = cadence >= 1 ? INACTIVE_FAST_AUTOPLAY_SECONDS : state.turnDuration;
@@ -1006,8 +1020,12 @@ export class GameEngineService {
     state.turnPhase   = 'MUST_DRAW';
     state.turnStartedAt = Date.now();
     state.toss        = null; // no toss animation for round ≥ 2
+    // Only the per-round cadence counter resets here. forfeitMissedTurns tracks a
+    // player's cumulative AI-auto-played turns across the WHOLE match (it resets
+    // solely on a manual move, see processMove) — wiping it on every round transition
+    // meant an AFK player's 12-move forfeit threshold could never be reached in a
+    // multi-round match, since a round almost always ends before 12 is hit within it.
     state.consecutiveMissedTurns = {};
-    state.forfeitMissedTurns     = {};
 
     // Re-evaluate 75-rule for every player using the updated cumulative match scores
     state.seventyFiveRule = Object.fromEntries(state.players.map(p => {
@@ -1015,8 +1033,6 @@ export class GameEngineService {
       const active    = teamScore >= 1000;
       return [p.userId, { active, requirement: 75, satisfied: !active }];
     }));
-
-    await this.redis.setJson(this.stateKey(gameId), state, 86400);
 
     // Build per-team breakdown from the final hand/meld state of the completed round.
     // Both pot-penalty and finish-bonus are already reflected in roundScores but are
@@ -1043,9 +1059,13 @@ export class GameEngineService {
       matchScore: state.matchScores[p.teamId] ?? 0,
       breakdown:  teamBreakdowns[p.teamId],
     }));
+    // Persist so a client that misses the one-shot 'game:new_round' event (e.g. mid-reconnect)
+    // still gets the correct round score via getGameState/buildClientView.
+    state.lastRoundScores = lastRoundScores;
+
+    await this.redis.setJson(this.stateKey(gameId), state, 86400);
 
     await this.socketService.emitPerPlayer(`game:${gameId}`, 'game:new_round', async (uid) => ({
-      lastRoundScores,
       ...this.buildClientView(state, uid),
     }));
 
@@ -1132,7 +1152,17 @@ export class GameEngineService {
     const winnerTeam = resigner.teamId === 1 ? 2 : 1;
     const winnerIds  = state.players.filter(p => p.teamId === winnerTeam).map(p => p.userId);
     const duration   = Math.floor((Date.now() - state.gameStartedAt) / 1000);
-    const scores: Record<number, number> = { 1: 0, 2: 0 };
+    // Carry over the match's actual accumulated score instead of fabricating zeros —
+    // otherwise a resign mid-round overwrote both the resigner's cached scoreboard and
+    // reward calculation with {1:0, 2:0}, losing all in-progress round score.
+    const scores     = state.matchScores ?? { 1: 0, 2: 0 };
+
+    // Mark the state COMPLETED (matching forfeitPlayer/finalizeGame) instead of deleting
+    // it outright, so a straggling move from the other player gets a clean
+    // GAME_NOT_IN_PROGRESS error instead of a raw "Game not found" 404.
+    state.status     = GameStatus.COMPLETED;
+    state.winnerTeam = winnerTeam;
+    await this.redis.setJson(this.stateKey(gameId), state, 7200);
 
     await this.prisma.$transaction(async (tx) => {
       await tx.gameSession.update({
@@ -1146,7 +1176,7 @@ export class GameEngineService {
           players: {
             updateMany: state.players.map(p => ({
               where: { userId: p.userId },
-              data: { result: winnerIds.includes(p.userId) ? 'WIN' : 'LOSS' },
+              data: { finalScore: scores[p.teamId] ?? 0, result: winnerIds.includes(p.userId) ? 'WIN' : 'LOSS' },
             })),
           },
         },
@@ -1164,7 +1194,7 @@ export class GameEngineService {
             create: state.players.map(p => ({
               userId: p.userId,
               teamId: p.teamId,
-              score:  0,
+              score:  scores[p.teamId] ?? 0,
               result: winnerIds.includes(p.userId) ? 'WIN' : 'LOSS',
             })),
           },
@@ -1175,13 +1205,12 @@ export class GameEngineService {
     await Promise.all(
       state.players.map(async (p) => {
         const isWinner = winnerIds.includes(p.userId);
-        const reward   = calculateMatchReward(0, isWinner);
+        const reward   = calculateMatchReward(scores[p.teamId] ?? 0, isWinner);
         await this.statsService.updateAfterMatch(p.userId, isWinner ? 'WIN' : 'LOSS', reward.points, reward.xp);
         await this.economyService.distributeMatchReward(p.userId, gameId, reward.coins);
       }),
     );
 
-    await this.redis.del(this.stateKey(gameId));
     await this.resetRoomAfterGame(gameId, state.players.map(p => p.userId));
     return { winnerTeam, winnerIds, scores, duration };
   }
@@ -1216,15 +1245,22 @@ export class GameEngineService {
     const player = state.players.find(p => p.userId === userId);
     if (!player) return;
     player.isConnected = true;
+    // If the timer already expired while this player was away and it is still their
+    // turn, give them a fresh full-duration window so the next cron tick does not
+    // immediately auto-play on their behalf. Otherwise leave turnStartedAt untouched
+    // so the remaining time is resumed rather than reset. Must check using the cadence
+    // that was actually in effect while they were away, before it gets zeroed below.
+    if (state.status === GameStatus.IN_PROGRESS && state.turnOrder[state.currentTurnIndex] === userId) {
+      const cadence = (state.consecutiveMissedTurns ?? {})[userId] ?? 0;
+      const effectiveTimeout = cadence >= 1 ? INACTIVE_FAST_AUTOPLAY_SECONDS : state.turnDuration;
+      const expired = Date.now() - state.turnStartedAt > effectiveTimeout * 1000;
+      if (expired) {
+        state.turnStartedAt = Date.now();
+      }
+    }
     // Stop AI takeover the moment the player is back — reset their auto-play counter.
     if (!state.consecutiveMissedTurns) state.consecutiveMissedTurns = {};
     state.consecutiveMissedTurns[userId] = 0;
-    // If the timer already expired while this player was away and it is still their
-    // turn, give them a fresh full-duration window so the next cron tick does not
-    // immediately auto-play on their behalf.
-    if (state.status === GameStatus.IN_PROGRESS && state.turnOrder[state.currentTurnIndex] === userId) {
-      state.turnStartedAt = Date.now();
-    }
     await this.redis.setJson(this.stateKey(gameId), state, 86400);
   }
 
@@ -1404,6 +1440,10 @@ export class GameEngineService {
               lastMove: drawMove,
               ...this.buildClientView(state, uid),
             }));
+            // Check the 12-move forfeit threshold BEFORE finalizeGame — otherwise a
+            // round transition can wipe out an AFK player's tally before the
+            // whole-match-ending forfeit is ever evaluated (see checkAndForfeit).
+            if (await this.checkAndForfeit(gameId, playerId, state)) return;
             await this.finalizeGame(gameId, state);
             return { playerId, autoAction: 'DRAW_THEN_FINALIZE', card: drawnCard };
           }
@@ -1480,6 +1520,9 @@ export class GameEngineService {
         lastMove: discardMove,
         ...this.buildClientView(state, uid),
       }));
+      // Same as above: evaluate the forfeit threshold before finalizeGame can start a
+      // new round and reset consecutiveMissedTurns out from under this check.
+      if (await this.checkAndForfeit(gameId, playerId, state)) return;
       await this.finalizeGame(gameId, state, playerTeamId);
       return { playerId, autoAction: drawnCard ? 'DRAW_THEN_DISCARD' : 'DISCARD', card: discardedCard };
     }

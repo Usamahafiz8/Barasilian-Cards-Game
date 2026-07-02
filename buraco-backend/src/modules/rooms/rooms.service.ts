@@ -5,6 +5,7 @@ import {
   NotFoundException,
   OnModuleInit,
 } from '@nestjs/common';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import { GameMode, GameVariant, RoomStatus } from '@prisma/client';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { EconomyService } from '../economy/economy.service';
@@ -260,13 +261,11 @@ export class RoomsService implements OnModuleInit {
 
     const seatFields = Object.entries(hash).filter(([f]) => !f.includes(':'));
 
-    const onlineFlags = await Promise.all(
-      seatFields.map(([, userId]) => this.redis.get(`online:${userId}`)),
-    );
+    // Batched lookup — a single MGET instead of one GET per occupied seat.
+    const onlineFlags = await this.redis.mget(seatFields.map(([, userId]) => `online:${userId}`));
 
     const seats: Record<string, { userId: string; username: string; teamId: number; isConnected: boolean }> = {};
     const seatList: SeatEntry[] = [];
-    const isLobbyRoom = room.status !== RoomStatus.IN_PROGRESS;
 
     seatFields.forEach(([field, userId], i) => {
       const seatIndex = parseInt(field, 10);
@@ -274,13 +273,9 @@ export class RoomsService implements OnModuleInit {
       const isConnected = !!onlineFlags[i];
       const teamId = seatIndex % 2 === 0 ? 1 : 2;
 
-      // Schedule lazy eviction for disconnected lobby seats — they will be removed
-      // from Redis after the grace period and disappear from future responses.
-      // We still include them in seatList now so currentPlayers === seatList.length.
-      if (isLobbyRoom && !isConnected) {
-        this.scheduleLazySeatEviction(userId);
-      }
-
+      // Disconnected lobby seats are cleaned up by the periodic sweepStaleLobbySeats
+      // cron job, not here — scheduling eviction from this read path caused unbounded
+      // work to compound as more clients polled the room list over time.
       seats[String(seatIndex)] = { userId, username, teamId, isConnected };
       seatList.push({ seatIndex, teamId, userId, username, isConnected });
     });
@@ -289,21 +284,31 @@ export class RoomsService implements OnModuleInit {
     return { ...room, seats, seatList };
   }
 
-  // Schedules a one-shot eviction for a disconnected lobby seat.
-  // A Redis lock prevents duplicate timers from stacking on repeated GET /rooms calls.
-  private scheduleLazySeatEviction(userId: string) {
-    const lockKey = `seat:evict:lock:${userId}`;
-    // setNx returns 'OK' only on first call; subsequent calls within 30 s are no-ops.
-    this.redis.setNx(lockKey, '1', 30).then((locked) => {
-      if (!locked) return;
-      setTimeout(async () => {
-        const stillOnline = await this.redis.get(`online:${userId}`);
-        if (!stillOnline) {
-          await this.evictFromAllLobbyRooms(userId);
-        }
-        // Lock TTL handles its own expiry; no manual del needed.
-      }, 30_000);
-    }).catch(() => { /* never throws — fire and forget */ });
+  // Single instance-wide sweep for lobby seats left behind by a disconnect that
+  // never triggered the gateway's grace-period eviction (e.g. server restart,
+  // ungraceful crash). Runs on a fixed cadence instead of being scheduled per
+  // room-list read, so cost stays bounded regardless of client polling.
+  @Cron(CronExpression.EVERY_30_SECONDS)
+  private async sweepStaleLobbySeats() {
+    const lobbyRooms = await this.prisma.room.findMany({
+      where: { status: { in: [RoomStatus.EMPTY, RoomStatus.WAITING, RoomStatus.READY, RoomStatus.FULL] } },
+    });
+
+    const staleUserIds = new Set<string>();
+    for (const room of lobbyRooms) {
+      const hash = (await this.redis.hgetall(this.seatsKey(room.id))) ?? {};
+      const seatFields = Object.entries(hash).filter(([f]) => !f.includes(':'));
+      if (seatFields.length === 0) continue;
+
+      const onlineFlags = await this.redis.mget(seatFields.map(([, userId]) => `online:${userId}`));
+      seatFields.forEach(([, userId], i) => {
+        if (!onlineFlags[i]) staleUserIds.add(userId);
+      });
+    }
+
+    for (const userId of staleUserIds) {
+      await this.evictFromAllLobbyRooms(userId);
+    }
   }
 
   async getRoomSeats(roomId: string): Promise<Record<string, string>> {

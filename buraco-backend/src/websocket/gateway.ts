@@ -316,6 +316,29 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
     });
   }
 
+  // Shared error handler for all game:move:* handlers. If the game already ended
+  // server-side (e.g. the opponent resigned) before this move was processed, resync
+  // the client with the terminal state via a clean game:end instead of a generic
+  // move_invalid — which otherwise looked like the game crashing on the player's next
+  // action rather than a normal "opponent left" ending.
+  private async handleMoveError(socket: Socket, gameId: string, err: unknown) {
+    const reason = (err as Error).message;
+    if (reason === 'GAME_NOT_IN_PROGRESS') {
+      try {
+        const state = await this.gameEngine.getGameState(gameId, socket.data.userId);
+        socket.emit('game:end', {
+          gameId,
+          reason: 'already_ended',
+          winnerTeam: state.winnerTeam ?? null,
+          scores: state.matchScores,
+        });
+        await this.reconnection.clearActiveGame(socket.data.userId);
+        return;
+      } catch { /* state missing entirely — fall through to generic error */ }
+    }
+    socket.emit('game:move_invalid', { gameId, reason });
+  }
+
   @SubscribeMessage('game:move:draw')
   async handleDraw(@ConnectedSocket() socket: Socket, @MessageBody() data: { gameId: string; source: 'STOCK' | 'DISCARD' }) {
     const userId = socket.data.userId;
@@ -336,7 +359,7 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
         await this.broadcastGameState(data.gameId, lastMove, userId);
       }
     } catch (err) {
-      socket.emit('game:move_invalid', { gameId: data.gameId, reason: (err as Error).message });
+      await this.handleMoveError(socket, data.gameId, err);
     }
   }
 
@@ -357,7 +380,7 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
         await this.broadcastGameState(data.gameId, lastMove, userId);
       }
     } catch (err) {
-      socket.emit('game:move_invalid', { gameId: data.gameId, reason: (err as Error).message });
+      await this.handleMoveError(socket, data.gameId, err);
     }
   }
 
@@ -379,7 +402,7 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
         await this.broadcastGameState(data.gameId, lastMove, userId);
       }
     } catch (err) {
-      socket.emit('game:move_invalid', { gameId: data.gameId, reason: (err as Error).message });
+      await this.handleMoveError(socket, data.gameId, err);
     }
   }
 
@@ -401,7 +424,7 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
         await this.broadcastGameState(data.gameId, lastMove, userId);
       }
     } catch (err) {
-      socket.emit('game:move_invalid', { gameId: data.gameId, reason: (err as Error).message });
+      await this.handleMoveError(socket, data.gameId, err);
     }
   }
 
@@ -417,7 +440,7 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
         await this.broadcastGameState(data.gameId, lastMove, userId);
       }
     } catch (err) {
-      socket.emit('game:move_invalid', { gameId: data.gameId, reason: (err as Error).message });
+      await this.handleMoveError(socket, data.gameId, err);
     }
   }
 
