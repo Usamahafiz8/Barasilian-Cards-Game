@@ -123,6 +123,15 @@ export interface GameState {
     teamId: number;
     roundScore: number;
     matchScore: number;
+    // Flat breakdown fields (the client scoreboard reads these directly). Kept
+    // alongside the nested `breakdown` for any existing consumer.
+    boardScore: number;
+    cleanBuraco: number;
+    semiCleanBuraco: number;
+    dirtyBuraco: number;
+    potNotTaken: number;
+    paidCards: number;
+    finishBonus: number;
     breakdown: ReturnType<typeof calculateScoreBreakdown>;
   }>;
 }
@@ -910,6 +919,47 @@ export class GameEngineService {
     state.matchScores[1] = (state.matchScores[1] || 0) + roundScores[1];
     state.matchScores[2] = (state.matchScores[2] || 0) + roundScores[2];
 
+    // Per-team breakdown of the round that JUST finished — computed HERE, while the
+    // completed round's hands/melds are still intact (the new-round branch below
+    // overwrites state.hands/state.melds before it deals). closer finish-bonus and the
+    // pot penalty are passed so the breakdown total matches roundScores exactly.
+    // Shared by the match-end game:end payload AND the new-round scoreboard so every
+    // client shows identical, server-authoritative per-player numbers.
+    const teamBreakdowns: Record<number, ReturnType<typeof calculateScoreBreakdown>> = {};
+    for (const teamId of [1, 2]) {
+      const teamPlayers = state.players.filter(p => p.teamId === teamId);
+      const allMelds = teamPlayers.flatMap(p => state.melds[p.userId] || []);
+      const allHand  = teamPlayers.flatMap(p => state.hands[p.userId] || []);
+      teamBreakdowns[teamId] = calculateScoreBreakdown(
+        allMelds,
+        allHand,
+        state.mode,
+        closerTeamId === teamId ? 100 : 0,
+        collectedTeams.includes(teamId) ? 0 : -100,
+      );
+    }
+
+    // Builds one player's authoritative round scoreboard row (flat breakdown fields the
+    // client reads directly, plus roundScore/matchScore). Identical for every client.
+    const buildPlayerRoundScore = (p: (typeof state.players)[number]) => {
+      const b = teamBreakdowns[p.teamId];
+      return {
+        playerId:        p.userId,
+        playerName:      state.usernames?.[p.userId] ?? '',
+        teamId:          p.teamId,
+        roundScore:      roundScores[p.teamId] ?? 0,
+        matchScore:      state.matchScores[p.teamId] ?? 0,
+        boardScore:      b.boardScore,
+        cleanBuraco:     b.cleanBuraco,
+        semiCleanBuraco: b.semiCleanBuraco,
+        dirtyBuraco:     b.dirtyBuraco,
+        potNotTaken:     b.potNotTaken,
+        paidCards:       b.paidCards,
+        finishBonus:     b.finishBonus,
+        breakdown:       b,
+      };
+    };
+
     const targetScore = state.targetScore ?? 0;
     const matchEnded =
       !!buracoOfTwos ||
@@ -927,6 +977,9 @@ export class GameEngineService {
       // Keep terminal state in Redis so GET /state returns COMPLETED status
       state.status     = GameStatus.COMPLETED;
       state.winnerTeam = winnerTeam;
+      // Persist the final round's per-player breakdown so GET /result can return the
+      // authoritative round score/breakdown (the DB matchRecord only stores cumulative score).
+      state.lastRoundScores = state.players.map(buildPlayerRoundScore);
       await this.redis.setJson(this.stateKey(gameId), state, 7200);
 
       await this.prisma.$transaction(async (tx) => {
@@ -983,6 +1036,28 @@ export class GameEngineService {
         winnerIds,
         scores: state.matchScores,
         roundScores,
+        // Per-player authoritative breakdown of the final round — identical in the
+        // payload sent to every client, so the WIN/LOSE scoreboard's Round Score and
+        // breakdown rows match on both devices (previously each client derived the
+        // opponent's breakdown from its own partial view and they diverged).
+        players: state.players.map(p => {
+          const s = buildPlayerRoundScore(p);
+          return {
+            userId:          p.userId,
+            playerName:      s.playerName,
+            teamId:          p.teamId,
+            result:          winnerIds.includes(p.userId) ? 'WIN' : 'LOSS',
+            score:           state.matchScores[p.teamId] ?? 0,
+            roundScore:      s.roundScore,
+            boardScore:      s.boardScore,
+            cleanBuraco:     s.cleanBuraco,
+            semiCleanBuraco: s.semiCleanBuraco,
+            dirtyBuraco:     s.dirtyBuraco,
+            potNotTaken:     s.potNotTaken,
+            paidCards:       s.paidCards,
+            finishBonus:     s.finishBonus,
+          };
+        }),
         duration,
         buracoOfTwos: !!buracoOfTwos,
         reason: buracoOfTwos ? 'buraco_of_twos' : 'target_score_reached',
@@ -1034,31 +1109,12 @@ export class GameEngineService {
       return [p.userId, { active, requirement: 75, satisfied: !active }];
     }));
 
-    // Build per-team breakdown from the final hand/meld state of the completed round.
-    // Both pot-penalty and finish-bonus are already reflected in roundScores but are
-    // included explicitly in the breakdown so the client scoreboard can show them.
-    const teamBreakdowns: Record<number, ReturnType<typeof calculateScoreBreakdown>> = {};
-    for (const teamId of [1, 2]) {
-      const teamPlayers = state.players.filter(p => p.teamId === teamId);
-      const allMelds = teamPlayers.flatMap(p => state.melds[p.userId] || []);
-      const allHand  = teamPlayers.flatMap(p => state.hands[p.userId] || []);
-      teamBreakdowns[teamId] = calculateScoreBreakdown(
-        allMelds,
-        allHand,
-        state.mode,
-        closerTeamId === teamId ? 100 : 0,
-        collectedTeams.includes(teamId) ? 0 : -100,
-      );
-    }
-
-    const lastRoundScores = state.players.map(p => ({
-      playerId:   p.userId,
-      playerName: state.usernames?.[p.userId] ?? '',
-      teamId:     p.teamId,
-      roundScore: roundScores[p.teamId] ?? 0,
-      matchScore: state.matchScores[p.teamId] ?? 0,
-      breakdown:  teamBreakdowns[p.teamId],
-    }));
+    // Per-player round scoreboard, sent identically to every client. Built from the
+    // shared teamBreakdowns computed at the top of finalizeGame — BEFORE the new round
+    // above overwrote state.hands/state.melds. (The old code recomputed the breakdown
+    // here from the freshly dealt hands/empty melds, which produced wrong per-player
+    // numbers.)
+    const lastRoundScores = state.players.map(buildPlayerRoundScore);
     // Persist so a client that misses the one-shot 'game:new_round' event (e.g. mid-reconnect)
     // still gets the correct round score via getGameState/buildClientView.
     state.lastRoundScores = lastRoundScores;
@@ -1225,7 +1281,34 @@ export class GameEngineService {
       },
     });
     if (!record) throw new NotFoundException('Game result not found');
-    return record;
+
+    // The DB matchRecord only persists cumulative `score`. Enrich each player row with
+    // the authoritative final-round breakdown so the WIN/LOSE scoreboard's Round Score
+    // and breakdown rows match on every device. Recomputed from the terminal Redis state,
+    // which finalizeGame keeps for ~2h; if it has expired we return the DB record as-is
+    // and the client falls back to its own local computation.
+    const state = await this.redis.getJson<GameState>(this.stateKey(gameId));
+    const byId = new Map((state?.lastRoundScores ?? []).map(s => [s.playerId, s]));
+    if (byId.size === 0) return record;
+
+    return {
+      ...record,
+      players: record.players.map(p => {
+        const s = byId.get(p.userId);
+        if (!s) return p;
+        return {
+          ...p,
+          roundScore:      s.roundScore,
+          boardScore:      s.boardScore,
+          cleanBuraco:     s.cleanBuraco,
+          semiCleanBuraco: s.semiCleanBuraco,
+          dirtyBuraco:     s.dirtyBuraco,
+          potNotTaken:     s.potNotTaken,
+          paidCards:       s.paidCards,
+          finishBonus:     s.finishBonus,
+        };
+      }),
+    };
   }
 
   // ── Disconnect / reconnect state tracking ─────────────────────────────────
