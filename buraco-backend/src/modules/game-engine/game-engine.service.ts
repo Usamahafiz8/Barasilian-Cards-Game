@@ -3,6 +3,10 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 import { GameMode, GameStatus, GameVariant, MoveType, RoomStatus } from '@prisma/client';
 
 const INACTIVE_FAST_AUTOPLAY_SECONDS = 5;
+// Forfeit a player after this many FULLY auto-played turns. Counted once per turn
+// (see handleTurnTimeout) and accumulated per-player across the whole match — a new
+// round/hand does NOT reset it; only a manual move by that player clears it.
+const FORFEIT_AFTER_AUTO_TURNS = 12;
 import { v4 as uuidv4 } from 'uuid';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { RedisService } from '../../common/redis/redis.service';
@@ -181,7 +185,20 @@ export class GameEngineService {
           const cadence = (state.consecutiveMissedTurns ?? {})[currentPlayerId] ?? 0;
           const effectiveTimeout = cadence >= 1 ? INACTIVE_FAST_AUTOPLAY_SECONDS : state.turnDuration;
           if (Date.now() - state.turnStartedAt > effectiveTimeout * 1000) {
-            await this.handleTurnTimeout(state.gameId);
+            // Idempotency lock. This cron runs EVERY_5_SECONDS over ALL games via
+            // Promise.all, and @Cron does not prevent a slow run from overlapping the
+            // next tick. Without this, two overlapping ticks could auto-play the SAME
+            // expired turn and each bump the miss counters (~2-3x per turn) — which is
+            // why the 12-turn forfeit was firing after only ~5 turns. Serialize
+            // auto-play to one run per game; the 15s TTL is a crash backstop.
+            const autoplayLock = `game:${state.gameId}:autoplay`;
+            if (await this.redis.setNx(autoplayLock, '1', 15)) {
+              try {
+                await this.handleTurnTimeout(state.gameId);
+              } finally {
+                await this.redis.del(autoplayLock);
+              }
+            }
           }
         }),
       );
@@ -1426,7 +1443,7 @@ export class GameEngineService {
    */
   private async checkAndForfeit(gameId: string, playerId: string, state: GameState): Promise<boolean> {
     const missed = state.forfeitMissedTurns?.[playerId] ?? state.consecutiveMissedTurns?.[playerId] ?? 0;
-    if (missed < 12) return false;
+    if (missed < FORFEIT_AFTER_AUTO_TURNS) return false;
     const isDisconnected = !(state.players.find(p => p.userId === playerId)?.isConnected ?? true);
     await this.forfeitPlayer(
       gameId, playerId, state,
