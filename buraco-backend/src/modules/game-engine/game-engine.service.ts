@@ -1573,6 +1573,15 @@ export class GameEngineService {
     // Smart play activates on the second and subsequent misses (priorMissed ≥ 1).
     const useSmartPlay = priorMissed >= 1;
 
+    // Coalesce this whole auto-turn (draw + melds + discard) into ONE broadcast instead
+    // of a game:state_updated per sub-move. The per-sub-move firehose — worst when both
+    // players are being auto-played at the 5s cadence — buried the socket heartbeat pong
+    // behind a large inbound backlog, which the client reported as a ~1500ms "ping" spike
+    // (a measurement artifact, not real latency). Sub-moves are collected here and sent as
+    // `autoMoves` on the single end-of-turn emit; the board the client applies is the
+    // fully-played end-of-turn state.
+    const autoMoves: Record<string, unknown>[] = [];
+
     let drawnCard: Card | undefined;
     if (state.turnPhase === 'MUST_DRAW') {
       // Smart play: take the discard top if it immediately helps form/extend a meld.
@@ -1633,19 +1642,15 @@ export class GameEngineService {
     }
 
     if (drawnCard) {
-      const drawMove = { type: 'TIMEOUT_DRAW', playerId, cardId: drawnCard.id, isAuto: true };
-      this.socketService.emitToRoom(`game:${gameId}`, 'game:move_played', drawMove);
-      await this.socketService.emitPerPlayer(`game:${gameId}`, 'game:state_updated', async (uid) => ({
-        lastMove: drawMove,
-        ...this.buildClientView(state, uid),
-      }));
+      // Collected, not emitted — folded into the single end-of-turn broadcast below.
+      autoMoves.push({ type: 'TIMEOUT_DRAW', playerId, cardId: drawnCard.id, isAuto: true });
     }
 
-    // Smart play: lay down melds and extensions between draw and discard.
-    // Each meld/extension is emitted as its own game:state_updated so the client
-    // can animate them individually.
+    // Smart play: lay down melds and extensions between draw and discard. These are
+    // collected into `autoMoves` (not emitted individually) and sent on the single
+    // end-of-turn broadcast; the client can replay them for animation when it's keeping up.
     if (useSmartPlay) {
-      await this.aiApplyMeldsAndExtensions(state, gameId, playerId);
+      await this.aiApplyMeldsAndExtensions(state, playerId, autoMoves);
     }
 
     const discardIdx = useSmartPlay
@@ -1658,12 +1663,11 @@ export class GameEngineService {
       state.turnStartedAt    = Date.now();
       state.turnPhase        = 'MUST_DRAW';
       await this.redis.setJson(this.stateKey(gameId), state, 86400);
-      if (!drawnCard) {
-        await this.socketService.emitPerPlayer(`game:${gameId}`, 'game:state_updated', async (uid) => ({
-          lastMove: { type: 'TIMEOUT_ADVANCE', playerId, isAuto: true },
-          ...this.buildClientView(state, uid),
-        }));
-      }
+      await this.socketService.emitPerPlayer(`game:${gameId}`, 'game:state_updated', async (uid) => ({
+        lastMove: { type: 'TIMEOUT_ADVANCE', playerId, isAuto: true },
+        autoMoves,
+        ...this.buildClientView(state, uid),
+      }));
       if (await this.checkAndForfeit(gameId, playerId, state)) return;
       return { playerId, autoAction: 'ADVANCE_NO_DISCARD' };
     }
@@ -1683,6 +1687,7 @@ export class GameEngineService {
         this.socketService.emitToRoom(`game:${gameId}`, 'game:move_played', discardMove);
         await this.socketService.emitPerPlayer(`game:${gameId}`, 'game:state_updated', async (uid) => ({
           lastMove: discardMove,
+          autoMoves,
           ...this.buildClientView(state, uid),
         }));
         if (await this.checkAndForfeit(gameId, playerId, state)) return;
@@ -1699,6 +1704,7 @@ export class GameEngineService {
       this.socketService.emitToRoom(`game:${gameId}`, 'game:move_played', discardMove);
       await this.socketService.emitPerPlayer(`game:${gameId}`, 'game:state_updated', async (uid) => ({
         lastMove: discardMove,
+        autoMoves,
         ...this.buildClientView(state, uid),
       }));
       // Same as above: evaluate the forfeit threshold before finalizeGame can start a
@@ -1721,6 +1727,7 @@ export class GameEngineService {
     this.socketService.emitToRoom(`game:${gameId}`, 'game:move_played', discardMove);
     await this.socketService.emitPerPlayer(`game:${gameId}`, 'game:state_updated', async (uid) => ({
       lastMove: discardMove,
+      autoMoves,
       ...this.buildClientView(state, uid),
     }));
 
@@ -1765,7 +1772,7 @@ export class GameEngineService {
    * emitting a separate game:state_updated per sub-move so the client can animate each
    * step individually (spec §9 emission requirements).  Keeps ≥1 card for the discard.
    */
-  private async aiApplyMeldsAndExtensions(state: GameState, gameId: string, playerId: string): Promise<void> {
+  private async aiApplyMeldsAndExtensions(state: GameState, playerId: string, autoMoves: Record<string, unknown>[]): Promise<void> {
     const hand    = state.hands[playerId];
     const teamId  = state.players.find(p => p.userId === playerId)?.teamId ?? 1;
     const teamIds = state.players.filter(p => p.teamId === teamId).map(p => p.userId);
@@ -1773,12 +1780,10 @@ export class GameEngineService {
 
     const teamMelds = () => teamIds.flatMap(uid => state.melds[uid] || []);
 
+    // Collect each meld/extension; the caller (handleTurnTimeout) folds them into the
+    // single end-of-turn broadcast so an AI turn is ONE message, not one per meld.
     const emitMeldMove = async (lastMove: Record<string, unknown>) => {
-      this.socketService.emitToRoom(`game:${gameId}`, 'game:move_played', lastMove);
-      await this.socketService.emitPerPlayer(`game:${gameId}`, 'game:state_updated', async (uid) => ({
-        lastMove,
-        ...this.buildClientView(state, uid),
-      }));
+      autoMoves.push(lastMove);
     };
 
     // 1 — Play new melds from hand (leave at least 1 card to discard).
