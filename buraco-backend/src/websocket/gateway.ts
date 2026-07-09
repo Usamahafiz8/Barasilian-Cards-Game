@@ -331,6 +331,10 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
           reason: 'already_ended',
           winnerTeam: state.winnerTeam ?? null,
           scores: state.matchScores,
+          // Same authoritative breakdown every other client already got in game:end —
+          // without it this resync path fell back to the client's own (diverging) local
+          // roundScore computation.
+          players: this.gameEngine.buildGameEndPlayersFromState(state),
         });
         await this.reconnection.clearActiveGame(socket.data.userId);
         return;

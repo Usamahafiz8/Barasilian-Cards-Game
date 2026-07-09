@@ -136,6 +136,26 @@ export interface GameState {
   }>;
 }
 
+/** One player's authoritative round-score breakdown row — same shape as `GameState.lastRoundScores` elements. */
+type PlayerRoundScoreRow = NonNullable<GameState['lastRoundScores']>[number];
+
+/** Public `game:end` per-player row — `userId`-keyed (vs. `PlayerRoundScoreRow`'s internal `playerId`) to match the socket payload the client reads. */
+type GameEndPlayerRow = {
+  userId: string;
+  playerName: string;
+  teamId: number;
+  result: 'WIN' | 'LOSS';
+  score: number;
+  roundScore: number;
+  boardScore: number;
+  cleanBuraco: number;
+  semiCleanBuraco: number;
+  dirtyBuraco: number;
+  potNotTaken: number;
+  paidCards: number;
+  finishBonus: number;
+};
+
 @Injectable()
 export class GameEngineService {
   private readonly logger = new Logger(GameEngineService.name);
@@ -894,11 +914,19 @@ export class GameEngineService {
     };
   }
 
-  async finalizeGame(gameId: string, state?: GameState, closerTeamId?: number, buracoOfTwos?: boolean) {
-    if (!state) state = (await this.redis.getJson<GameState>(this.stateKey(gameId))) ?? undefined;
-    if (!state) throw new NotFoundException('Game not found');
+  // ── Shared round-score breakdown (finalizeGame, resignGame, forfeitPlayer) ────────
+  // A resign/forfeit ends the game from a hidden-hand state exactly like a normal round
+  // close does, so it must go through the SAME server-side computation — otherwise those
+  // paths fall back to omitting roundScore/breakdown, and each client derives the
+  // opponent's hand-penalty locally from its own partial view and disagrees with the
+  // other device. Computing it once here and sending it verbatim is the fix.
 
-    // Compute this round's scores
+  /** Per-team round total + score breakdown from the CURRENT melds/hands on `state`. */
+  private computeRoundBreakdown(
+    state: GameState,
+    closerTeamId?: number,
+    applyPotPenalty = true,
+  ): { roundScores: Record<number, number>; teamBreakdowns: Record<number, ReturnType<typeof calculateScoreBreakdown>> } {
     const roundScores: Record<number, number> = { 1: 0, 2: 0 };
     for (const player of state.players) {
       const score = calculateScore(state.melds[player.userId] || [], state.hands[player.userId] || [], state.mode);
@@ -908,23 +936,14 @@ export class GameEngineService {
       roundScores[closerTeamId] = (roundScores[closerTeamId] || 0) + 100;
     }
     const collectedTeams = state.potCollectedByTeam ?? [];
-    for (const teamId of [1, 2]) {
-      if (!collectedTeams.includes(teamId)) {
-        roundScores[teamId] = (roundScores[teamId] || 0) - 100;
+    if (applyPotPenalty) {
+      for (const teamId of [1, 2]) {
+        if (!collectedTeams.includes(teamId)) {
+          roundScores[teamId] = (roundScores[teamId] || 0) - 100;
+        }
       }
     }
 
-    // Accumulate into match scores
-    if (!state.matchScores) state.matchScores = { 1: 0, 2: 0 };
-    state.matchScores[1] = (state.matchScores[1] || 0) + roundScores[1];
-    state.matchScores[2] = (state.matchScores[2] || 0) + roundScores[2];
-
-    // Per-team breakdown of the round that JUST finished — computed HERE, while the
-    // completed round's hands/melds are still intact (the new-round branch below
-    // overwrites state.hands/state.melds before it deals). closer finish-bonus and the
-    // pot penalty are passed so the breakdown total matches roundScores exactly.
-    // Shared by the match-end game:end payload AND the new-round scoreboard so every
-    // client shows identical, server-authoritative per-player numbers.
     const teamBreakdowns: Record<number, ReturnType<typeof calculateScoreBreakdown>> = {};
     for (const teamId of [1, 2]) {
       const teamPlayers = state.players.filter(p => p.teamId === teamId);
@@ -935,20 +954,27 @@ export class GameEngineService {
         allHand,
         state.mode,
         closerTeamId === teamId ? 100 : 0,
-        collectedTeams.includes(teamId) ? 0 : -100,
+        applyPotPenalty && !collectedTeams.includes(teamId) ? -100 : 0,
       );
     }
+    return { roundScores, teamBreakdowns };
+  }
 
-    // Builds one player's authoritative round scoreboard row (flat breakdown fields the
-    // client reads directly, plus roundScore/matchScore). Identical for every client.
-    const buildPlayerRoundScore = (p: (typeof state.players)[number]) => {
+  /** Builds one authoritative round-scoreboard row per player — identical for every client. */
+  private buildPlayerRoundScoreRows(
+    state: GameState,
+    roundScores: Record<number, number>,
+    teamBreakdowns: Record<number, ReturnType<typeof calculateScoreBreakdown>>,
+    matchScores: Record<number, number>,
+  ): PlayerRoundScoreRow[] {
+    return state.players.map(p => {
       const b = teamBreakdowns[p.teamId];
       return {
         playerId:        p.userId,
         playerName:      state.usernames?.[p.userId] ?? '',
         teamId:          p.teamId,
         roundScore:      roundScores[p.teamId] ?? 0,
-        matchScore:      state.matchScores[p.teamId] ?? 0,
+        matchScore:      matchScores[p.teamId] ?? 0,
         boardScore:      b.boardScore,
         cleanBuraco:     b.cleanBuraco,
         semiCleanBuraco: b.semiCleanBuraco,
@@ -958,7 +984,57 @@ export class GameEngineService {
         finishBonus:     b.finishBonus,
         breakdown:       b,
       };
-    };
+    });
+  }
+
+  /** Converts internal (`playerId`-keyed) rows to the public `game:end` (`userId`-keyed) shape. */
+  private toGameEndPlayers(rows: PlayerRoundScoreRow[], winnerIds: string[]): GameEndPlayerRow[] {
+    return rows.map(s => ({
+      userId:          s.playerId,
+      playerName:      s.playerName,
+      teamId:          s.teamId,
+      result:          winnerIds.includes(s.playerId) ? 'WIN' as const : 'LOSS' as const,
+      score:           s.matchScore,
+      roundScore:      s.roundScore,
+      boardScore:      s.boardScore,
+      cleanBuraco:     s.cleanBuraco,
+      semiCleanBuraco: s.semiCleanBuraco,
+      dirtyBuraco:     s.dirtyBuraco,
+      potNotTaken:     s.potNotTaken,
+      paidCards:       s.paidCards,
+      finishBonus:     s.finishBonus,
+    }));
+  }
+
+  /**
+   * Resyncs a client that replays a move after the game already ended server-side
+   * (see AppGateway.handleMoveError) with the same authoritative breakdown everyone
+   * else already received in `game:end`, instead of omitting it.
+   */
+  buildGameEndPlayersFromState(view: { lastRoundScores?: PlayerRoundScoreRow[]; winnerTeam?: number | null }): GameEndPlayerRow[] {
+    const rows = view.lastRoundScores ?? [];
+    const winnerIds = rows.filter(r => r.teamId === view.winnerTeam).map(r => r.playerId);
+    return this.toGameEndPlayers(rows, winnerIds);
+  }
+
+  async finalizeGame(gameId: string, state?: GameState, closerTeamId?: number, buracoOfTwos?: boolean) {
+    if (!state) state = (await this.redis.getJson<GameState>(this.stateKey(gameId))) ?? undefined;
+    if (!state) throw new NotFoundException('Game not found');
+
+    // Compute this round's scores + per-player breakdown from the shared helpers above —
+    // also used by resignGame/forfeitPlayer so every ending path sends identical numbers.
+    const { roundScores, teamBreakdowns } = this.computeRoundBreakdown(state, closerTeamId, true);
+
+    // Accumulate into match scores
+    if (!state.matchScores) state.matchScores = { 1: 0, 2: 0 };
+    state.matchScores[1] = (state.matchScores[1] || 0) + roundScores[1];
+    state.matchScores[2] = (state.matchScores[2] || 0) + roundScores[2];
+
+    // Per-player authoritative round scoreboard rows — computed HERE, while the completed
+    // round's hands/melds are still intact (the new-round branch below overwrites
+    // state.hands/state.melds before it deals). Shared by the match-end game:end payload
+    // AND the new-round scoreboard so every client shows identical numbers.
+    const playerRoundRows = this.buildPlayerRoundScoreRows(state, roundScores, teamBreakdowns, state.matchScores);
 
     const targetScore = state.targetScore ?? 0;
     const matchEnded =
@@ -979,7 +1055,7 @@ export class GameEngineService {
       state.winnerTeam = winnerTeam;
       // Persist the final round's per-player breakdown so GET /result can return the
       // authoritative round score/breakdown (the DB matchRecord only stores cumulative score).
-      state.lastRoundScores = state.players.map(buildPlayerRoundScore);
+      state.lastRoundScores = playerRoundRows;
       await this.redis.setJson(this.stateKey(gameId), state, 7200);
 
       await this.prisma.$transaction(async (tx) => {
@@ -1040,24 +1116,7 @@ export class GameEngineService {
         // payload sent to every client, so the WIN/LOSE scoreboard's Round Score and
         // breakdown rows match on both devices (previously each client derived the
         // opponent's breakdown from its own partial view and they diverged).
-        players: state.players.map(p => {
-          const s = buildPlayerRoundScore(p);
-          return {
-            userId:          p.userId,
-            playerName:      s.playerName,
-            teamId:          p.teamId,
-            result:          winnerIds.includes(p.userId) ? 'WIN' : 'LOSS',
-            score:           state.matchScores[p.teamId] ?? 0,
-            roundScore:      s.roundScore,
-            boardScore:      s.boardScore,
-            cleanBuraco:     s.cleanBuraco,
-            semiCleanBuraco: s.semiCleanBuraco,
-            dirtyBuraco:     s.dirtyBuraco,
-            potNotTaken:     s.potNotTaken,
-            paidCards:       s.paidCards,
-            finishBonus:     s.finishBonus,
-          };
-        }),
+        players: this.toGameEndPlayers(playerRoundRows, winnerIds),
         duration,
         buracoOfTwos: !!buracoOfTwos,
         reason: buracoOfTwos ? 'buraco_of_twos' : 'target_score_reached',
@@ -1114,10 +1173,9 @@ export class GameEngineService {
     // above overwrote state.hands/state.melds. (The old code recomputed the breakdown
     // here from the freshly dealt hands/empty melds, which produced wrong per-player
     // numbers.)
-    const lastRoundScores = state.players.map(buildPlayerRoundScore);
     // Persist so a client that misses the one-shot 'game:new_round' event (e.g. mid-reconnect)
     // still gets the correct round score via getGameState/buildClientView.
-    state.lastRoundScores = lastRoundScores;
+    state.lastRoundScores = playerRoundRows;
 
     await this.redis.setJson(this.stateKey(gameId), state, 86400);
 
@@ -1198,7 +1256,10 @@ export class GameEngineService {
   async resignGame(
     gameId: string,
     resigningUserId: string,
-  ): Promise<{ winnerTeam: number; winnerIds: string[]; scores: Record<number, number>; duration: number } | null> {
+  ): Promise<{
+    winnerTeam: number; winnerIds: string[]; scores: Record<number, number>; duration: number;
+    players: GameEndPlayerRow[];
+  } | null> {
     const state = await this.redis.getJson<GameState>(this.stateKey(gameId));
     if (!state || state.status !== GameStatus.IN_PROGRESS) return null;
 
@@ -1213,11 +1274,22 @@ export class GameEngineService {
     // reward calculation with {1:0, 2:0}, losing all in-progress round score.
     const scores     = state.matchScores ?? { 1: 0, 2: 0 };
 
+    // Authoritative per-player breakdown of the round in progress when they resigned —
+    // no closer (nobody melded out) and no pot penalty (the round never reached a state
+    // where "failing" to take the pot is meaningful). Same computation finalizeGame uses,
+    // so both devices' resign scoreboards show identical numbers instead of each deriving
+    // the opponent's hidden-hand penalty locally and disagreeing (see computeRoundBreakdown).
+    const { roundScores, teamBreakdowns } = this.computeRoundBreakdown(state, undefined, false);
+    const playerRoundRows = this.buildPlayerRoundScoreRows(state, roundScores, teamBreakdowns, scores);
+
     // Mark the state COMPLETED (matching forfeitPlayer/finalizeGame) instead of deleting
     // it outright, so a straggling move from the other player gets a clean
     // GAME_NOT_IN_PROGRESS error instead of a raw "Game not found" 404.
     state.status     = GameStatus.COMPLETED;
     state.winnerTeam = winnerTeam;
+    // Persist so GET /result and a resync via getGameState can also return the breakdown
+    // (mirrors finalizeGame — see getGameResult's byId lookup on state.lastRoundScores).
+    state.lastRoundScores = playerRoundRows;
     await this.redis.setJson(this.stateKey(gameId), state, 7200);
 
     await this.prisma.$transaction(async (tx) => {
@@ -1268,7 +1340,7 @@ export class GameEngineService {
     );
 
     await this.resetRoomAfterGame(gameId, state.players.map(p => p.userId));
-    return { winnerTeam, winnerIds, scores, duration };
+    return { winnerTeam, winnerIds, scores, duration, players: this.toGameEndPlayers(playerRoundRows, winnerIds) };
   }
 
   async getGameResult(gameId: string) {
@@ -1389,8 +1461,16 @@ export class GameEngineService {
     const duration   = Math.floor((Date.now() - state.gameStartedAt) / 1000);
     const scores     = state.matchScores ?? { 1: 0, 2: 0 };
 
+    // Authoritative per-player breakdown of the round in progress at forfeit time — same
+    // reasoning as resignGame: no closer, no pot penalty, computed once server-side so
+    // both devices' scoreboards agree instead of each guessing the opponent's hand penalty.
+    const { roundScores, teamBreakdowns } = this.computeRoundBreakdown(state, undefined, false);
+    const playerRoundRows = this.buildPlayerRoundScoreRows(state, roundScores, teamBreakdowns, scores);
+
     state.status     = GameStatus.COMPLETED;
     state.winnerTeam = winnerTeam;
+    // Persist so GET /result and a resync via getGameState can also return the breakdown.
+    state.lastRoundScores = playerRoundRows;
     await this.redis.setJson(this.stateKey(gameId), state, 7200);
 
     // Clear active game for all players directly (ReconnectionService not injected here)
@@ -1452,6 +1532,7 @@ export class GameEngineService {
       scores,
       duration,
       reason,
+      players: this.toGameEndPlayers(playerRoundRows, winnerIds),
     });
 
     await this.resetRoomAfterGame(gameId, state.players.map(p => p.userId));
