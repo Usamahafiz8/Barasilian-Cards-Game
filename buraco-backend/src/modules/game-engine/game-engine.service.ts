@@ -1043,6 +1043,20 @@ export class GameEngineService {
     if (!state) state = (await this.redis.getJson<GameState>(this.stateKey(gameId))) ?? undefined;
     if (!state) throw new NotFoundException('Game not found');
 
+    // Terminal guard: never re-open a match that another ending path (forfeit / resign /
+    // a prior finalize) already completed. Without this, a stale or concurrent finalize —
+    // e.g. an in-flight auto-play sub-move landing just after forfeitPlayer set COMPLETED —
+    // would deal a fresh round on an already-ended game, resurrecting a finished match and
+    // producing the "one device shows the scoreboard, the other starts a new round" desync
+    // (#4). It also enforces "12 auto-turns ALWAYS ends the match, never just the round" (#13):
+    // once forfeit fires, no straggling finalize can turn the match-end back into a round.
+    if (state.status !== GameStatus.IN_PROGRESS) {
+      // Return a winnerTeam-bearing shape so callers that narrow on `'winnerTeam' in result`
+      // (the gateway move handlers) treat this exactly like a normal match-end — clear active
+      // games, do NOT re-broadcast or re-deal. The game already ended; there is nothing to do.
+      return { alreadyEnded: true as const, winnerTeam: state.winnerTeam ?? 0 };
+    }
+
     // Compute this round's scores + per-player breakdown from the shared helpers above —
     // also used by resignGame/forfeitPlayer so every ending path sends identical numbers.
     const { roundScores, teamBreakdowns } = this.computeRoundBreakdown(state, closerTeamId, true);
@@ -1181,7 +1195,21 @@ export class GameEngineService {
     // solely on a manual move, see processMove) — wiping it on every round transition
     // meant an AFK player's 12-move forfeit threshold could never be reached in a
     // multi-round match, since a round almost always ends before 12 is hit within it.
-    state.consecutiveMissedTurns = {};
+    //
+    // Reset cadence for CONNECTED players (they get a fresh full turn window next round),
+    // but PRESERVE it for players who are still disconnected. Otherwise a disconnected
+    // player's first turn of every new round falls back from the 5s fast-autoplay path to
+    // the full turnDuration (e.g. 30s), so reaching the 12-turn forfeit could take many
+    // minutes across a multi-round match — the "12 AI moves but the game won't end" report
+    // (#12). Keeping cadence for the disconnected keeps them on the 5s path so the forfeit
+    // is reached in bounded time. A reconnect zeroes this for that player (markPlayerReconnected).
+    const carriedCadence: Record<string, number> = {};
+    for (const p of state.players) {
+      if (p.isConnected === false) {
+        carriedCadence[p.userId] = (state.consecutiveMissedTurns ?? {})[p.userId] ?? 1;
+      }
+    }
+    state.consecutiveMissedTurns = carriedCadence;
 
     // Re-evaluate 75-rule for every player using the updated cumulative match scores
     state.seventyFiveRule = Object.fromEntries(state.players.map(p => {

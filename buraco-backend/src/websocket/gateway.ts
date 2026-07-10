@@ -17,7 +17,7 @@ import { RedisService } from '../common/redis/redis.service';
 import { ReconnectionService } from '../modules/reconnection/reconnection.service';
 import { RoomsService } from '../modules/rooms/rooms.service';
 import { SocketService } from '../common/socket/socket.service';
-import { MoveType, RoomStatus } from '@prisma/client';
+import { GameStatus, MoveType, RoomStatus } from '@prisma/client';
 import { Logger } from '@nestjs/common';
 
 @WebSocketGateway({ cors: { origin: '*' }, namespace: '/' })
@@ -250,6 +250,24 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
     try {
       const view = await this.gameEngine.getGameState(data.gameId, userId);
 
+      // Reconnect into an already-ended game (#9 / #4): if the match completed while this
+      // client was away (finished / forfeited / resigned), do NOT replay the snapshot or
+      // deal — send an authoritative game:end so the client shows the final scoreboard
+      // instead of staying stuck in a dead game, and so a player who was disconnected at
+      // match end still receives the game:end they missed. Same breakdown every other
+      // client already got in game:end (built from the persisted lastRoundScores).
+      if (view.status === GameStatus.COMPLETED) {
+        socket.emit('game:end', {
+          gameId:     data.gameId,
+          reason:     'already_ended',
+          winnerTeam: view.winnerTeam ?? null,
+          scores:     view.matchScores,
+          players:    this.gameEngine.buildGameEndPlayersFromState(view),
+        });
+        await this.reconnection.clearActiveGame(userId);
+        return;
+      }
+
       // 1 — stable seat map (same for every player, fresh join or reconnect)
       const seatMap = view.players
         .map((p) => ({
@@ -306,6 +324,22 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
     await this.gameEngine.markPlayerReconnected(data.gameId, userId);
 
     const state = await this.gameEngine.getGameState(data.gameId, userId);
+
+    // Reconnect into an already-ended game (#9 / #4): deliver an authoritative game:end
+    // (final scoreboard) rather than a state_sync the client would have to infer as
+    // terminal — mirrors handleGameJoin and handleMoveError.
+    if (state.status === GameStatus.COMPLETED) {
+      socket.emit('game:end', {
+        gameId:     data.gameId,
+        reason:     'already_ended',
+        winnerTeam: state.winnerTeam ?? null,
+        scores:     state.matchScores,
+        players:    this.gameEngine.buildGameEndPlayersFromState(state),
+      });
+      await this.reconnection.clearActiveGame(userId);
+      return;
+    }
+
     socket.emit('game:state_sync', state);
 
     // Notify all players that this player is back (symmetric with player:connection false)
