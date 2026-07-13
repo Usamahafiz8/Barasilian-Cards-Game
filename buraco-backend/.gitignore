@@ -4,3 +4,10 @@ dist
 .env
 
 /generated/prisma
+
+# macOS
+.DS_Store
+
+# Private keys
+*.pem
+*.key
